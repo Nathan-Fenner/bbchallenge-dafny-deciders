@@ -120,8 +120,10 @@ function method machine_step(program: Program, m: MachineState): MachineStep {
     else Halt
 }
 
-// This method is a helper for moving 'n' steps forward in time.
-function method machine_step_n(program: Program, m: MachineState, n: nat): MachineStep{
+// This function is a helper for moving 'n' steps forward in time.
+// It is a `function` rather than `function method` because it will cause stack-overflow if run
+// for more than a small number of iterations.
+function machine_step_n(program: Program, m: MachineState, n: nat): MachineStep {
   if n == 0
     // If n is zero, then the output is the same as the initial program.
     then NextMachine(m)
@@ -133,9 +135,27 @@ function method machine_step_n(program: Program, m: MachineState, n: nat): Machi
     }
 }
 
-// This method returns the nth TM state for a program, starting from the
+// This method computes the same value as `machine_step_n` (guaranteed by its ensures clause below).
+// This version can be called at runtime because it will not overflow the stack.
+method machine_step_iterative(program: Program, m: MachineState, n: nat)
+returns (result: MachineStep)
+ensures result == machine_step_n(program, m, n) {
+  var i := 0;
+  var current_state := NextMachine(m);
+
+  while i < n
+  invariant 0 <= i <= n
+  invariant current_state == machine_step_n(program, m, i)
+  {
+    current_state := if current_state.Halt? then Halt else machine_step(program, current_state.next_state);
+    i := i + 1;
+  }
+  return current_state;
+}
+
+// This function returns the nth TM state for a program, starting from the
 // initial state.
-function method machine_iter_n(program: Program, n: nat): MachineStep {
+function machine_iter_n(program: Program, n: nat): MachineStep {
   machine_step_n(program, initial, n)
 }
 
@@ -152,7 +172,6 @@ predicate program_loops_forever(program: Program) {
 //
 //
 // Everything below this point is for the algorithm.
-// 
 //
 //
 //
@@ -251,4 +270,48 @@ ensures machine_iter_n(program, n).next_state in visited
     // and the lemma's requirements.
     assert !machine_iter_n(program, n).Halt?;
   }
+}
+
+method Main() {
+  // This is the current candidate for BB(5):
+  // 1RB1LC_1RC1RB_1RD0LE_1LA1LD_---0LA
+  // It runs for 47,176,870 steps and then halts.
+  var busy_beaver_candidate: Program := map[
+    ProgramStepInput(B0, CA) := Action(B1, CB, R),
+    ProgramStepInput(B1, CA) := Action(B1, CC, L),
+    
+    ProgramStepInput(B0, CB) := Action(B1, CC, R),
+    ProgramStepInput(B1, CB) := Action(B1, CB, R),
+    
+    ProgramStepInput(B0, CC) := Action(B1, CD, R),
+    ProgramStepInput(B1, CC) := Action(B0, CE, L),
+    
+    ProgramStepInput(B0, CD) := Action(B1, CA, L),
+    ProgramStepInput(B1, CD) := Action(B1, CD, L),
+    
+    // ProgramStepInput(B0, CE) := Action(B1, CZ, R), // Halt
+    ProgramStepInput(B1, CE) := Action(B0, CA, L)
+  ];
+
+  print busy_beaver_candidate;
+  print "\n";
+
+  var step_count;
+  var result;
+  
+  step_count := 47_176_869;
+  print "Run for ";
+  print step_count;
+  print " steps...\n-> halt? ";
+  result := machine_step_iterative(busy_beaver_candidate, initial, step_count);
+  print result.Halt?;
+  print "\n";
+
+  step_count := 47_176_870;
+  print "Run for ";
+  print step_count;
+  print " steps...\n-> halt? ";
+  result := machine_step_iterative(busy_beaver_candidate, initial, step_count);
+  print result.Halt?;
+  print "\n";
 }
