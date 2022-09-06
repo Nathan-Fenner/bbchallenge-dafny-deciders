@@ -251,6 +251,16 @@ ensures matches(ta + tb, Cat([a, b]))
   assert matches(ta + tb, Cat([a, b]));
 }
 
+lemma catenating_seqs_matches_cat(ta: seq<Bit>, tb: seq<Bit>, a: seq<Reg>, b: seq<Reg>)
+requires matches(ta, Cat(a))
+requires matches(tb, Cat(b))
+ensures matches(ta + tb, Cat(a + b))
+{
+  catenating_matches_cat(ta, tb, Cat(a), Cat(b));
+  assert matches(ta + tb, Cat([Cat(a), Cat(b)]));
+  cat_cat_cat_induction(ta + tb, a, b);
+}
+
 datatype Deriv = Deriv(can_be_empty: bool, after_0: Reg, after_1: Reg)
 
 method deriv_of(r: Reg) returns (result: Deriv)
@@ -490,6 +500,32 @@ datatype GeneralizeParams = GeneralizeParams(
   max_length: nat
 )
 
+// This lemma proves that if you replace some middle section of a Cat with a different regex,
+// as long as the replaced part covers the original, the whole regex covers the original.
+lemma cat_replace(whole: seq<Reg>, lo: nat, hi: nat, new_range: seq<Reg>)
+requires 0 <= lo <= hi <= |whole|
+requires forall tape: seq<Bit> | matches(tape, Cat(whole[lo..hi])) :: matches(tape, Cat(new_range))
+ensures forall tape: seq<Bit> | matches(tape, Cat(whole)) :: matches(tape, Cat(whole[..lo] + new_range + whole[hi..]))
+{
+  forall tape: seq<Bit> | matches(tape, Cat(whole))
+  ensures matches(tape, Cat(whole[..lo] + new_range + whole[hi..]))
+  {
+    cat_n_split(tape, whole, lo);
+    var n1 :| 0 <= n1 <= |tape| && matches(tape[..n1], Cat(whole[..lo])) && matches(tape[n1..], Cat(whole[lo..]));
+    cat_n_split(tape[n1..], whole[lo..], hi - lo);
+    assert whole[lo..hi] == whole[lo..][..hi - lo];
+    var n2 :| 0 <= n2 <= |tape[n1..]| && matches(tape[n1..][..n2], Cat(whole[lo..hi])) && matches(tape[n1..][n2..], Cat(whole[hi..]));
+    assert tape[n1..][..n2] == tape[n1..n1+n2];
+    assert matches(tape[n1..n1+n2], Cat(whole[lo..hi]));
+    assert matches(tape[n1..n1+n2], Cat(new_range));
+    catenating_seqs_matches_cat(tape[..n1], tape[n1..n1+n2], whole[..lo], new_range);
+    assert tape[..n1] + tape[n1..n1+n2] == tape[..n1+n2];
+    assert matches(tape[..n1+n2], Cat(whole[..lo] + new_range));
+    assert tape[..n1+n2] + tape[n1..][n2..] == tape;
+    catenating_seqs_matches_cat(tape[..n1+n2], tape[n1+n2..], whole[..lo] + new_range, whole[hi..]);
+  }
+}
+
 // This function allows us to move beyond just listing neighborhoods as finite strings.
 // Specifically, we want to convert long finite regexes into short "classy" ones.
 method generalize_cover(r: Reg, params: GeneralizeParams) returns (covers: set<Reg>)
@@ -539,6 +575,48 @@ ensures forall tape: HalfTape :: half_tape_matches(tape, r) ==> exists cover :: 
       }
       return covers;
     }
+
+    var i := 0;
+    var min_repeat := 4;
+    while i < |r.items| {
+      var group_size := 1;
+      while i + group_size * min_repeat <= |r.items| {
+        // If there are min_repeat duplicates, starting from i,
+        // then replace the last with a Plus.
+
+        var all_same := true;
+        var j := 0;
+        while j < min_repeat && all_same {
+          if r.items[i + j*group_size..i + (j+1)*group_size] != r.items[i..i+group_size] {
+            all_same := false;
+          }
+          j := j + 1;
+        }
+
+        if all_same {
+          var remove_start := i;
+          var remove_end := i + group_size;
+
+          var new_plus := Plus(Cat(r.items[remove_start..remove_end]));
+          forall tape | matches(tape, Cat(r.items[remove_start..remove_end]))
+          ensures matches(tape, Cat([new_plus]))
+          {
+            catenating_matches_single(tape, new_plus);
+          }
+          cat_replace(r.items, remove_start, remove_end, [new_plus]);
+          // Add in a plus at the beginning.
+          // TODO: If there is a plus right before this, should we also remove that one?
+          // Or will that just not happen?
+          return {
+            Cat(r.items[..remove_start] + [new_plus] + r.items[remove_end..])
+          };
+        }
+        group_size := group_size + 1;
+      }
+      i := i + 1;
+    }
+
+
   }
 
   return { r };
