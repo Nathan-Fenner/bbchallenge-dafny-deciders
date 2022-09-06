@@ -3,17 +3,146 @@ datatype Reg = Cat(items: seq<Reg>) | Lit(Bit)| Plus(rep: Reg) | Alt(first: Reg,
 
 function method cat(a: Reg, b: Reg): Reg {
   match (a, b) {
-    // case (Never, b) => Never
-    // case (a, Never) => Never
+    case (Cat(alist), Cat(blist)) => Cat(alist + blist)
+    case (a, Cat(blist)) => Cat([a] + blist)
+    case (Cat(alist), b) => Cat(alist + [b])
+    case (Never, b) => Never
+    case (a, Never) => Never
     case (Any, Any) => Any
     case _ => Cat([a, b])
   }
+}
+
+lemma catenating_matches_single(t: seq<Bit>, r: Reg)
+requires matches(t, r)
+ensures matches(t, Cat([r]))
+{
+  var n := |t|;
+  assert t == t[..n];
+  assert matches(t[..n], r);
+  assert matches(t[n..], Cat([]));
+}
+
+lemma catenating_matches_single_rev(t: seq<Bit>, r: Reg)
+requires matches(t, Cat([r]))
+ensures matches(t, r)
+{
+  var n := |t|;
+  assert t == t[..n];
+  assert matches(t[..n], r);
+  assert matches(t[n..], Cat([]));
+}
+
+lemma cat2_split(tape: seq<Bit>, a: Reg, b: Reg)
+requires matches(tape, Cat([a, b]))
+ensures exists n :: 0 <= n <= |tape| && matches(tape[..n], a) && matches(tape[n..], b)
+{
+  var n1 :| 0 <= n1 <= |tape| && matches(tape[..n1], a) && matches(tape[n1..], Cat([b]));
+  var rest := tape[n1..];
+  assert matches(rest, Cat([b]));
+  var n2 :| 0 <= n2 <= |rest| && matches(rest[..n2], b) && matches(rest[n2..], Cat([]));
+  assert rest[n2..] == [];
+  assert rest[..n2] == rest;
+  assert matches(rest, b);
+  assert matches(rest[n2..], Cat([]));
+  assert matches(tape[n1..], b);
+}
+
+lemma cat_cat_cat_induction(tape: seq<Bit>, alist: seq<Reg>, blist: seq<Reg>)
+decreases |alist|
+requires matches(tape, Cat([Cat(alist), Cat(blist)]))
+ensures matches(tape, Cat(alist + blist))
+{
+  cat2_split(tape, Cat(alist), Cat(blist));
+  var n :| 0 <= n <= |tape| && matches(tape[..n], Cat(alist)) && matches(tape[n..], Cat(blist));
+  if |alist| == 0 {
+    assert alist + blist == blist;
+    assert matches(tape, Cat(alist + blist));
+    return;
+  }
+
+  var tape_a := tape[..n];
+  assert matches(tape_a, Cat(alist));
+  var n_a :| 0 <= n_a <= |tape_a| && matches(tape_a[..n_a], alist[0]) && matches(tape_a[n_a..], Cat(alist[1..]));
+
+  catenating_matches_cat(tape_a[n_a..], tape[n..], Cat(alist[1..]), Cat(blist));
+  assert matches(tape_a[n_a..] + tape[n..], Cat([Cat(alist[1..]), Cat(blist)]));
+  cat_cat_cat_induction(tape_a[n_a..] + tape[n..], alist[1..], blist);
+  assert matches(tape_a[n_a..] + tape[n..], Cat(alist[1..] + blist));
+
+  catenating_matches_cat(tape_a[..n_a], tape_a[n_a..] + tape[n..], alist[0], Cat(alist[1..] + blist));
+  assert matches(tape_a[..n_a] + (tape_a[n_a..] + tape[n..]), Cat([alist[0], Cat(alist[1..] + blist)]));
+  assert tape_a[..n_a] + (tape_a[n_a..] + tape[n..]) == tape;
+  assert matches(tape, Cat([alist[0], Cat(alist[1..] + blist)]));
+  cat2_split(tape, alist[0], Cat(alist[1..] + blist));
+  var nf :| 0 <= nf <= |tape| && matches(tape[..nf], alist[0]) && matches(tape[nf..], Cat(alist[1..] + blist));
+  assert matches(tape, Cat([alist[0]] + (alist[1..] + blist)));
+  assert [alist[0]] + (alist[1..] + blist) == alist + blist;
+  assert matches(tape, Cat(alist + blist));
+}
+
+lemma cat_r_cat_induction(tape: seq<Bit>, a: Reg, blist: seq<Reg>)
+requires matches(tape, Cat([a, Cat(blist)]))
+ensures matches(tape, Cat([a] + blist))
+{
+  cat2_split(tape, a, Cat(blist));
+  var n :| 0 <= n <= |tape| && matches(tape[..n], a) && matches(tape[n..], Cat(blist));
+}
+
+lemma cat_cat_r_induction(tape: seq<Bit>, alist: seq<Reg>, b: Reg)
+requires matches(tape, Cat([Cat(alist), b]))
+ensures matches(tape, Cat(alist + [b]))
+{
+  cat2_split(tape, Cat(alist), b);
+  var n :| 0 <= n <= |tape| && matches(tape[..n], Cat(alist)) && matches(tape[n..], b);
+  catenating_matches_single(tape[n..], b);
+  assert matches(tape[n..], Cat([b]));
+  catenating_matches_cat(tape[..n], tape[n..], Cat(alist), Cat([b]));
+  assert tape[..n] + tape[n..] == tape;
+  assert matches(tape, Cat([Cat(alist), Cat([b])]));
+  cat_cat_cat_induction(tape, alist, [b]);
 }
 
 lemma cat_works(a: Reg, b: Reg)
 ensures forall tape: seq<Bit> | matches(tape, Cat([a, b])) :: matches(tape, cat(a, b))
 {
   match (a, b) {
+    case (Cat(alist), Cat(blist)) => {
+      forall tape: seq<Bit> | matches(tape, Cat([a, b]))
+      ensures matches(tape, cat(a, b))
+      {
+        cat_cat_cat_induction(tape, alist, blist);
+        assert matches(tape, Cat(alist + blist));
+      }
+    }
+    case (a, Cat(blist)) => {
+      forall tape: seq<Bit> | matches(tape, Cat([a, b]))
+      ensures matches(tape, cat(a, b))
+      {
+        cat_r_cat_induction(tape, a, blist);
+      }
+    }
+    case (Cat(alist), b) => {
+      forall tape: seq<Bit> | matches(tape, Cat([a, b]))
+      ensures matches(tape, cat(a, b))
+      {
+        cat_cat_r_induction(tape, alist, b);
+      }
+    }
+    case (Never, b) => {
+    }
+    case (a, Never) => {
+      forall tape: seq<Bit> | matches(tape, Cat([a, b]))
+      ensures matches(tape, cat(a, b))
+      {
+        var r := Cat([a, b]);
+        assert a == r.items[0];
+        assert Cat([b]) == Cat(r.items[1..]);
+        var n :| 0 <= n <= |tape| && matches(tape[..n], a) && matches(tape[n..], Cat([b]));
+        assert matches(tape[n..], Cat([b]));
+        catenating_matches_single(tape[n..], b);
+      }
+    }
     case (Any, Any) => {
       // ...
     }
@@ -23,7 +152,7 @@ ensures forall tape: seq<Bit> | matches(tape, Cat([a, b])) :: matches(tape, cat(
   }
 }
 
-function alt(a: Reg, b: Reg): Reg {
+function method alt(a: Reg, b: Reg): Reg {
   if a == b then a else
   if a == Plus(b) then a else
   if b == Plus(a) then b else
@@ -39,7 +168,6 @@ function alt(a: Reg, b: Reg): Reg {
 lemma alt_works(a: Reg, b: Reg)
 ensures forall t: seq<Bit> :: matches(t, Alt(a, b)) ==> matches(t, alt(a, b))
 {
-
 }
 
 function reg_sum_size(rs: seq<Reg>): nat {
@@ -75,15 +203,7 @@ decreases reg_size(r), |s|
   }
 }
 
-lemma catenating_matches_single(t: seq<Bit>, r: Reg)
-requires matches(t, r)
-ensures matches(t, Cat([r]))
-{
-  var n := |t|;
-  assert t == t[..n];
-  assert matches(t[..n], r);
-  assert matches(t[n..], Cat([]));
-}
+
 
 lemma catenating_matches_cat(ta: seq<Bit>, tb: seq<Bit>, a: Reg, b: Reg)
 requires matches(ta, a)
@@ -130,6 +250,8 @@ ensures forall t: seq<Bit> | t != [] && t[0] == B1 && matches(t, r) :: matches(t
         after_0 := Alt(drep.after_0, cat(drep.after_0, Plus(rep))),
         after_1 := Alt(drep.after_1, cat(drep.after_1, Plus(rep)))
       );
+      cat_works(drep.after_0, Plus(rep));
+      cat_works(drep.after_1, Plus(rep));
       assert matches([], r) <==> result.can_be_empty;
       forall t: seq<Bit> | t != [] && t[0] == B0 && matches(t, r)
       ensures matches(t[1..], result.after_0)
@@ -196,8 +318,8 @@ ensures forall t: seq<Bit> | t != [] && t[0] == B1 && matches(t, r) :: matches(t
       if da.can_be_empty {
         result := Deriv(
           can_be_empty := db.can_be_empty,
-          after_0 := Alt(db.after_0, cat(da.after_0, b)),
-          after_1 := Alt(db.after_1, cat(da.after_1, b))
+          after_0 := alt(db.after_0, cat(da.after_0, b)),
+          after_1 := alt(db.after_1, cat(da.after_1, b))
         );
 
         cat_works(da.after_0, b);
