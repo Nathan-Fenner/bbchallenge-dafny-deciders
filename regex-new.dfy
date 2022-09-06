@@ -44,6 +44,8 @@ ensures forall tape: seq<Bit> | matches(tape, Cat(a, b)) :: matches(tape, cat(a,
 
 function alt(a: Reg, b: Reg): Reg {
   if a == b then a else
+  if a == Plus(b) then a else
+  if b == Plus(a) then b else
   match (a, b) {
     case (Any, _) => Any
     case (_, Any) => Any
@@ -125,8 +127,8 @@ ensures forall t: seq<Bit> | t != [] && t[0] == B1 && matches(t, r) :: matches(t
       var drep := deriv_of(rep);
       result := Deriv(
         can_be_empty := drep.can_be_empty,
-        after_0 := Alt(drep.after_0, Cat(drep.after_0, Plus(rep))),
-        after_1 := Alt(drep.after_1, Cat(drep.after_1, Plus(rep)))
+        after_0 := Alt(drep.after_0, cat(drep.after_0, Plus(rep))),
+        after_1 := Alt(drep.after_1, cat(drep.after_1, Plus(rep)))
       );
       assert matches([], r) <==> result.can_be_empty;
       forall t: seq<Bit> | t != [] && t[0] == B0 && matches(t, r)
@@ -182,9 +184,12 @@ ensures forall t: seq<Bit> | t != [] && t[0] == B1 && matches(t, r) :: matches(t
       if da.can_be_empty {
         result := Deriv(
           can_be_empty := db.can_be_empty,
-          after_0 := Alt(db.after_0, Cat(da.after_0, b)),
-          after_1 := Alt(db.after_1, Cat(da.after_1, b))
+          after_0 := Alt(db.after_0, cat(da.after_0, b)),
+          after_1 := Alt(db.after_1, cat(da.after_1, b))
         );
+
+        cat_works(da.after_0, b);
+        cat_works(da.after_1, b);
 
         if result.can_be_empty {
           assert matches([], a);
@@ -230,9 +235,11 @@ ensures forall t: seq<Bit> | t != [] && t[0] == B1 && matches(t, r) :: matches(t
       } else {
         result := Deriv(
           can_be_empty := false,
-          after_0 := Cat(da.after_0, b),
-          after_1 := Cat(da.after_1, b)
+          after_0 := cat(da.after_0, b),
+          after_1 := cat(da.after_1, b)
         );
+        cat_works(da.after_0, b);
+        cat_works(da.after_1, b);
         forall t: seq<Bit> | t != [] && t[0] == B0 && matches(t, r)
         ensures matches(t[1..], result.after_0) {
           var n :| 0 <= n <= |t| && matches(t[..n], a) && matches(t[n..], b);
@@ -259,3 +266,43 @@ ensures forall t: seq<Bit> | t != [] && t[0] == B1 && matches(t, r) :: matches(t
   }
 }
 
+
+
+
+datatype RawHalfTape = HalfTape(initial: seq<Bit>)
+type HalfTape = x: RawHalfTape | x.initial == [] || x.initial[|x.initial|-1] == B1
+  witness HalfTape([])
+
+
+function make_zeros(n: nat): seq<Bit>
+{
+  if n == 0 then [] else [B0] + make_zeros(n-1)
+}
+
+lemma make_zeros_works(n: nat)
+ensures |make_zeros(n)| == n
+ensures forall i :: 0 <= i < n ==> make_zeros(n)[i] == B0
+{}
+
+function take_from_tape(tape: HalfTape, n: nat): seq<Bit>
+{
+  if n <= |tape.initial| then tape.initial[..n]
+  else tape.initial + make_zeros(n - |tape.initial|)
+}
+
+function drop_from_tape(tape: HalfTape, n: nat): HalfTape {
+  if n <= |tape.initial| then HalfTape(initial := tape.initial[n..])
+  else HalfTape(initial := [])
+}
+
+predicate half_tape_matches(tape: HalfTape, r: Reg)
+{
+  exists n: nat :: drop_from_tape(tape, n) == HalfTape([]) && matches(take_from_tape(tape, n), r)
+}
+
+// This function allows us to move beyond just listing neighborhoods as finite strings.
+method generalize_cover(r: Reg) returns (covers: set<Reg>)
+ensures forall tape: HalfTape :: half_tape_matches(tape, r) ==> exists cover :: cover in covers && half_tape_matches(tape, cover)
+{
+  return { r };
+}
