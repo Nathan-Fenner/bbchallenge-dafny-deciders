@@ -48,6 +48,37 @@ ensures exists n :: 0 <= n <= |tape| && matches(tape[..n], a) && matches(tape[n.
   assert matches(tape[n1..], b);
 }
 
+lemma cat_n_split(tape: seq<Bit>, items: seq<Reg>, n: nat)
+requires matches(tape, Cat(items))
+requires 0 <= n <= |items|
+ensures exists split: nat :: 0 <= split <= |tape| && matches(tape[..split], Cat(items[..n])) && matches(tape[split..], Cat(items[n..]))
+{
+  if n == 0 {
+    var split := 0;
+    assert split <= |tape|;
+    assert matches(tape[..split], Cat(items[..n]));
+    assert matches(tape[split..], Cat(items[n..]));
+    assert exists split: nat :: 0 <= split <= |tape| && matches(tape[..split], Cat(items[..n])) && matches(tape[split..], Cat(items[n..]));
+    return;
+  }
+  var split_first :| 0 <= split_first <= |tape| && matches(tape[..split_first], items[0]) && matches(tape[split_first..], Cat(items[1..]));
+  cat_n_split(tape[split_first..], items[1..], n-1);
+  var split_rest :| 0 <= split_rest <= |tape[split_first..]|
+    && matches(tape[split_first..][..split_rest], Cat(items[1..][..n-1]))
+    && matches(tape[split_first..][split_rest..], Cat(items[1..][n-1..]))
+  ;
+  assert tape[..split_first] + tape[split_first..][..split_rest] == tape[..split_first + split_rest];
+  catenating_matches_cat(tape[..split_first], tape[split_first..][..split_rest], items[0], Cat(items[1..][..n-1]));
+  assert matches(tape[..split_first + split_rest], Cat([items[0], Cat(items[1..][..n-1])]));
+  assert items[1..][..n-1] == items[1..n];
+  assert matches(tape[..split_first + split_rest], Cat([items[0], Cat(items[1..n])]));
+  cat_r_cat_induction(tape[..split_first + split_rest], items[0], items[1..n]);
+  assert matches(tape[..split_first + split_rest], Cat([items[0]] + items[1..n]));
+  assert [items[0]] + items[1..n] == items[..n];
+  assert matches(tape[..split_first + split_rest], Cat(items[..n]));
+  assert exists split: nat :: 0 <= split <= |tape| && matches(tape[..split], Cat(items[..n])) && matches(tape[split..], Cat(items[n..]));
+}
+
 lemma cat_cat_cat_induction(tape: seq<Bit>, alist: seq<Reg>, blist: seq<Reg>)
 decreases |alist|
 requires matches(tape, Cat([Cat(alist), Cat(blist)]))
@@ -451,9 +482,60 @@ predicate half_tape_matches(tape: HalfTape, r: Reg)
   exists n: nat :: drop_from_tape(tape, n) == HalfTape([]) && matches(take_from_tape(tape, n), r)
 }
 
+datatype GeneralizeParams = GeneralizeParams(
+  max_length: nat
+)
+
 // This function allows us to move beyond just listing neighborhoods as finite strings.
-method generalize_cover(r: Reg) returns (covers: set<Reg>)
+// Specifically, we want to convert long finite regexes into short "classy" ones.
+method generalize_cover(r: Reg, params: GeneralizeParams) returns (covers: set<Reg>)
 ensures forall tape: HalfTape :: half_tape_matches(tape, r) ==> exists cover :: cover in covers && half_tape_matches(tape, cover)
 {
+  if r.Alt? {
+    // Alternations are automatically split, to reduce the size of regex and exchange them for smaller ones.
+    var cover_first := generalize_cover(r.first, params);
+    var cover_second := generalize_cover(r.second, params);
+    covers := cover_first + cover_second;
+    forall tape | half_tape_matches(tape, r)
+    ensures exists cover :: cover in covers && half_tape_matches(tape, cover) {
+      assert half_tape_matches(tape, r.first) || half_tape_matches(tape, r.second);
+    }
+    return covers;
+  }
+
+  if r.Cat? {
+    // Most optimizations happen here.
+    if |r.items| > params.max_length + 1 {
+      // If the regex is too large, assume that far-away portions are unimportant, and
+      // remove them entirely, replacing with 'Any'.
+      var items_keep := r.items[..params.max_length];
+      var items_discard := r.items[params.max_length..];
+      assert r.items == items_keep + items_discard;
+      var any_cover := Cat(r.items[..params.max_length] + [Any]);
+      covers := { any_cover };
+      forall tape | half_tape_matches(tape, r)
+      ensures exists cover :: cover in covers && half_tape_matches(tape, cover) {
+        var n :| drop_from_tape(tape, n) == HalfTape([]) && matches(take_from_tape(tape, n), r);
+        var t := take_from_tape(tape, n);
+        assert matches(t, r);
+        cat_n_split(t, r.items, |items_keep|);
+        var n_initial :| 0 <= n_initial <= |t| && matches(t[..n_initial], Cat(items_keep)) && matches(t[n_initial..], Cat(items_discard));
+        catenating_matches_cat(t[..n_initial], t[n_initial..], Cat(items_keep), Cat(items_discard));
+        assert t == t[..n_initial] + t[n_initial..];
+        assert matches(t, Cat([Cat(items_keep), Cat(items_discard)]));
+        cat2_split(t, Cat(items_keep), Cat(items_discard));
+        var n_split :| 0 <= n_split <= |t| && matches(t[..n_split], Cat(items_keep)) && matches(t[n_split..], Cat(items_discard));
+        assert matches(t[n_split..], Any);
+        catenating_matches_cat(t[..n_split], t[n_split..], Cat(items_keep), Any);
+        assert t[..n_split] + t[n_split..] == t;
+        assert matches(t, Cat([Cat(items_keep), Any]));
+        cat_cat_r_induction(t, items_keep, Any);
+        assert matches(t, any_cover);
+        assert half_tape_matches(tape, any_cover);
+      }
+      return covers;
+    }
+  }
+
   return { r };
 }
