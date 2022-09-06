@@ -482,7 +482,11 @@ predicate half_tape_matches(tape: HalfTape, r: Reg)
   exists n: nat :: drop_from_tape(tape, n) == HalfTape([]) && matches(take_from_tape(tape, n), r)
 }
 
+// These params affect how generalization occurs.
 datatype GeneralizeParams = GeneralizeParams(
+  // The maximum number of items allowed to appear in the outermost Cat.
+  // If set to 0, no effect.
+  // If not zero and more than `max_length` items appear, everything after `max_length-1` is replaced by `Any`.
   max_length: nat
 )
 
@@ -505,13 +509,13 @@ ensures forall tape: HalfTape :: half_tape_matches(tape, r) ==> exists cover :: 
 
   if r.Cat? {
     // Most optimizations happen here.
-    if |r.items| > params.max_length + 1 {
+    if params.max_length != 0 && |r.items| > params.max_length {
       // If the regex is too large, assume that far-away portions are unimportant, and
       // remove them entirely, replacing with 'Any'.
-      var items_keep := r.items[..params.max_length];
-      var items_discard := r.items[params.max_length..];
+      var items_keep := r.items[..params.max_length-1];
+      var items_discard := r.items[params.max_length-1..];
       assert r.items == items_keep + items_discard;
-      var any_cover := Cat(r.items[..params.max_length] + [Any]);
+      var any_cover := Cat(items_keep + [Any]);
       covers := { any_cover };
       forall tape | half_tape_matches(tape, r)
       ensures exists cover :: cover in covers && half_tape_matches(tape, cover) {
