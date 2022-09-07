@@ -3,11 +3,11 @@ datatype Reg = Cat(items: seq<Reg>) | Lit(Bit)| Plus(rep: Reg) | Alt(first: Reg,
 
 function method cat(a: Reg, b: Reg): Reg {
   match (a, b) {
+    case (Never, b) => Never
+    case (a, Never) => Never
     case (Cat(alist), Cat(blist)) => Cat(alist + blist)
     case (a, Cat(blist)) => Cat([a] + blist)
     case (Cat(alist), b) => Cat(alist + [b])
-    case (Never, b) => Never
-    case (a, Never) => Never
     case (Any, Any) => Any
     case _ => Cat([a, b])
   }
@@ -134,10 +134,46 @@ ensures matches(tape, Cat(alist + [b]))
   cat_cat_cat_induction(tape, alist, [b]);
 }
 
+lemma cat_works__catx(a: Reg, b: Reg)
+requires a.Cat? && !a.Never?
+requires !b.Cat? && !b.Never?
+ensures forall tape: seq<Bit> | matches(tape, Cat([a, b])) :: matches(tape, cat(a, b))
+{
+  var alist := a.items;
+  forall tape: seq<Bit> | matches(tape, Cat([a, b]))
+  ensures matches(tape, cat(a, b))
+  {
+    cat_cat_r_induction(tape, alist, b);
+    assert matches(tape, Cat(alist + [b]));
+  }
+}
+
+lemma cat_works__xnever(a: Reg, b: Reg)
+requires !a.Never?
+requires b.Never?
+ensures forall tape: seq<Bit> | matches(tape, Cat([a, b])) :: matches(tape, cat(a, b))
+{
+  forall tape: seq<Bit> | matches(tape, Cat([a, b]))
+  ensures matches(tape, cat(a, b))
+  {
+    var r := Cat([a, b]);
+    assert a == r.items[0];
+    assert Cat([b]) == Cat(r.items[1..]);
+    var n :| 0 <= n <= |tape| && matches(tape[..n], a) && matches(tape[n..], Cat([b]));
+    assert matches(tape[n..], Cat([b]));
+    catenating_matches_single(tape[n..], b);
+  }
+}
+
 lemma cat_works(a: Reg, b: Reg)
 ensures forall tape: seq<Bit> | matches(tape, Cat([a, b])) :: matches(tape, cat(a, b))
 {
   match (a, b) {
+    case (Never, _) => {
+    }
+    case (_, Never) => {
+      cat_works__xnever(a, b);
+    }
     case (Cat(alist), Cat(blist)) => {
       forall tape: seq<Bit> | matches(tape, Cat([a, b]))
       ensures matches(tape, cat(a, b))
@@ -146,34 +182,17 @@ ensures forall tape: seq<Bit> | matches(tape, Cat([a, b])) :: matches(tape, cat(
         assert matches(tape, Cat(alist + blist));
       }
     }
-    case (a, Cat(blist)) => {
+    case (_, Cat(blist)) => {
       forall tape: seq<Bit> | matches(tape, Cat([a, b]))
       ensures matches(tape, cat(a, b))
       {
         cat_r_cat_induction(tape, a, blist);
       }
     }
-    case (Cat(alist), b) => {
-      forall tape: seq<Bit> | matches(tape, Cat([a, b]))
-      ensures matches(tape, cat(a, b))
-      {
-        cat_cat_r_induction(tape, alist, b);
-      }
+    case (Cat(_), _) => {
+      cat_works__catx(a, b);
     }
-    case (Never, b) => {
-    }
-    case (a, Never) => {
-      forall tape: seq<Bit> | matches(tape, Cat([a, b]))
-      ensures matches(tape, cat(a, b))
-      {
-        var r := Cat([a, b]);
-        assert a == r.items[0];
-        assert Cat([b]) == Cat(r.items[1..]);
-        var n :| 0 <= n <= |tape| && matches(tape[..n], a) && matches(tape[n..], Cat([b]));
-        assert matches(tape[n..], Cat([b]));
-        catenating_matches_single(tape[n..], b);
-      }
-    }
+
     case (Any, Any) => {
       // ...
     }
@@ -213,6 +232,30 @@ function reg_size(r: Reg): nat {
   case Lit(_) => 1
   case Plus(r) => 1 + reg_size(r)
   case Any => 1
+  }
+}
+
+lemma reg_size_cat_remove_last(r: Reg)
+requires r.Cat? && |r.items| >= 1
+decreases |r.items|
+ensures reg_size(Cat(r.items[..|r.items|-1])) < reg_size(r)
+{
+  if |r.items| == 1 {
+    assert Cat(r.items[..|r.items|-1]) == Cat([]);
+    assert reg_size(Cat(r.items[..|r.items|-1])) == 1;
+    assert reg_size(r) == reg_size(r.items[0]) + 1 + reg_size(Cat(r.items[1..]));
+    assert r.items[1..] == [];
+    assert reg_size(Cat(r.items[..|r.items|-1])) < reg_size(r);
+  } else {
+    reg_size_cat_remove_last(Cat(r.items[1..]));
+    assert reg_size(Cat(r.items[1..])) > reg_size(Cat(r.items[1..][..|r.items[1..]| - 1]));
+    assert reg_size(r) == reg_size(r.items[0]) + 1 + reg_size(Cat(r.items[1..]));
+    assert Cat(r.items[1..][..|r.items[1..]| - 1]) == Cat(r.items[1..|r.items| - 1]);
+
+    assert r.items[..|r.items|-1][0] == r.items[0];
+    assert reg_size(Cat(r.items[..|r.items|-1])) == reg_size(r.items[0]) + 1 + reg_size(Cat(r.items[..|r.items|-1][1..]));
+
+    assert reg_size(Cat(r.items[..|r.items|-1])) < reg_size(r);
   }
 }
 
@@ -526,11 +569,107 @@ ensures forall tape: seq<Bit> | matches(tape, Cat(whole)) :: matches(tape, Cat(w
   }
 }
 
+lemma take_from_tape_length(tape: HalfTape, n: nat)
+ensures |take_from_tape(tape, n)| == n
+{
+  if n <= |tape.initial| {
+    assert take_from_tape(tape, n) == tape.initial[..n];
+  } else {
+    assert take_from_tape(tape, n) == tape.initial + make_zeros(n - |tape.initial|);
+    make_zeros_works(n - |tape.initial|);
+  }
+}
+
+lemma take_from_tape_shorter(tape: HalfTape, n1: nat, n2: nat)
+requires n1 <= n2
+ensures |take_from_tape(tape, n2)| == n2
+ensures take_from_tape(tape, n1) == take_from_tape(tape, n2)[..n1] 
+{
+  take_from_tape_length(tape, n2);
+  take_from_tape_length(tape, n1);
+
+  if n1 <= |tape.initial| {
+    assert take_from_tape(tape, n1) == tape.initial[..n1];
+    if n2 <= |tape.initial| {
+      assert take_from_tape(tape, n2) == tape.initial[..n2];
+      assert tape.initial[..n2][..n1] == tape.initial[..n1];
+    } else {
+      assert take_from_tape(tape, n2) == tape.initial + make_zeros(n2 - |tape.initial|);
+    }
+  } else {
+    assert take_from_tape(tape, n1) == tape.initial + make_zeros(n1 - |tape.initial|);
+    assert take_from_tape(tape, n2) == tape.initial + make_zeros(n2 - |tape.initial|);
+    assert take_from_tape(tape, n2)[..n1] == tape.initial + make_zeros(n2 - |tape.initial|)[..n1 - |tape.initial|];
+    make_zeros_works(n2 - |tape.initial|);
+    make_zeros_works(n1 - |tape.initial|);
+    assert make_zeros(n2 - |tape.initial|)[..n1 - |tape.initial|] == make_zeros(n1 - |tape.initial|);
+  }
+} 
+
+
+lemma can_trim_0_tape(tape: HalfTape, r: Reg)
+requires r.Cat? && |r.items| >= 1 && r.items[|r.items|-1] == Lit(B0)
+requires half_tape_matches(tape, r)
+ensures half_tape_matches(tape, Cat(r.items[..|r.items|-1]))
+{
+  var shorter := r.items[..|r.items|-1];
+  var n_lead: nat :| drop_from_tape(tape, n_lead) == HalfTape([]) && matches(take_from_tape(tape, n_lead), r);
+  var lead := take_from_tape(tape, n_lead);
+  cat_n_split(lead, r.items, |r.items|-1);
+  var last: nat :| 0 <= last <= |lead| && matches(lead[..last], Cat(shorter)) && matches(lead[last..], Cat(r.items[|r.items|-1..]));
+  assert Cat(r.items[|r.items|-1..]) == Cat([Lit(B0)]);
+  assert matches(lead[last..], Cat([Lit(B0)]));
+  assert matches(lead[last..], Lit(B0));
+  assert lead[last..] == [B0];
+  assert last == |lead| - 1;
+  take_from_tape_length(tape, n_lead);
+  assert |lead| == n_lead;
+  assert last <= n_lead;
+  take_from_tape_shorter(tape, last, n_lead);
+  assert take_from_tape(tape, last) == lead[..last];
+}
+
+lemma can_trim_0(r: Reg)
+requires r.Cat? && |r.items| >= 1 && r.items[|r.items|-1] == Lit(B0)
+ensures forall tape: HalfTape | half_tape_matches(tape, r) :: half_tape_matches(tape, Cat(r.items[..|r.items|-1]))
+{
+  var shorter := Cat(r.items[..|r.items|-1]);
+  forall tape: HalfTape | half_tape_matches(tape, r)
+  ensures half_tape_matches(tape, shorter)
+  {
+    can_trim_0_tape(tape, r);
+  }
+}
+
+function TriggerGeneralizeCover(state: MachineState, id: nat): nat {
+  0
+}
+
+method state_generalize_cover(r: RegexState, params: GeneralizeParams, id: nat) returns (covers: set<RegexState>)
+ensures forall state: MachineState {:trigger TriggerGeneralizeCover(state, id)} :: state_matches(state, r) ==> exists cover :: cover in covers && state_matches(state, r)
+{
+  var left_covers := generalize_cover(r.left, params);
+  var right_covers := generalize_cover(r.right, params);
+
+  covers := set left, right | left in left_covers && right in right_covers :: RegexState(color := r.color, head_symbol := r.head_symbol, left := left, right := right);
+  forall state: MachineState | state_matches(state, r)
+  ensures exists cover :: cover in covers && state_matches(state, r)
+  {
+    var left_cover :| left_cover in left_covers && half_tape_matches(state.left, left_cover);
+    var right_cover :| right_cover in right_covers && half_tape_matches(state.right, right_cover);
+    var combined := RegexState(color := r.color, head_symbol := r.head_symbol, left := left_cover, right := right_cover);
+    assert state_matches(state, combined);
+    assert combined in covers;
+  }
+}
+
 // This function allows us to move beyond just listing neighborhoods as finite strings.
 // Specifically, we want to convert long finite regexes into short "classy" ones.
 method generalize_cover(r: Reg, params: GeneralizeParams) returns (covers: set<Reg>)
+decreases reg_size(r)
 ensures forall tape: HalfTape :: half_tape_matches(tape, r) ==> exists cover :: cover in covers && half_tape_matches(tape, cover)
 {
+
   if r.Alt? {
     // Alternations are automatically split, to reduce the size of regex and exchange them for smaller ones.
     var cover_first := generalize_cover(r.first, params);
@@ -544,6 +683,15 @@ ensures forall tape: HalfTape :: half_tape_matches(tape, r) ==> exists cover :: 
   }
 
   if r.Cat? {
+    if |r.items| >= 1 && r.items[|r.items|-1] == Lit(B0) {
+      var shorter := Cat(r.items[..|r.items|-1]);
+      can_trim_0(r);
+      // covers := { shorter };
+      reg_size_cat_remove_last(r);
+      assert reg_size(shorter) < reg_size(r);
+      covers := generalize_cover(shorter, params);
+      return covers;
+    }
     // Most optimizations happen here.
     if params.max_length != 0 && |r.items| > params.max_length {
       // If the regex is too large, assume that far-away portions are unimportant, and
@@ -757,6 +905,10 @@ ensures result == machine_step_n(program, m, n) {
   invariant 0 <= i <= n
   invariant current_state == machine_step_n(program, m, i)
   {
+    if i % 1000000 == 0 {
+      print i;
+      print "\n";
+    }
     current_state := if current_state.Halt? then Halt else machine_step(program, current_state.next_state);
     i := i + 1;
   }
@@ -811,9 +963,88 @@ ensures half_tape_matches(cons(b, tape), cat(Lit(b), r))
   assert half_tape_matches(cons(b, tape), cat(Lit(b), r));
 }
 
+function TriggerStateCover(s: MachineState): nat {
+  0
+}
+
+predicate all_covering(program: Program, initial: RegexState, new_covers: set<RegexState>)
+{
+  forall state: MachineState {:trigger TriggerStateCover(state) } | state_matches(state, initial) :: !machine_step(program, state).Halt? && exists cover: RegexState :: cover in new_covers && state_matches(machine_step(program, state).next_state, cover)
+}
+
+function TriggerGeneralizeEach(st: MachineState): nat {
+  0
+}
+
+predicate state_matches_any(state: MachineState, covers: set<RegexState>) {
+  exists cover :: cover in covers && state_matches(state, cover)
+}
+
+function TriggerGeneralizeEachInternal(state: MachineState, id: nat): nat {
+  0
+}
+
+method generalize_each_cover(covers: set<RegexState>, params: GeneralizeParams, id: nat)
+returns (expanded_covers: set<RegexState>)
+ensures forall state {:trigger TriggerGeneralizeEach(state)} :: state_matches_any(state, covers) ==> state_matches_any(state, expanded_covers)
+{
+  /*
+  if covers == {} {
+    forall state
+    ensures state_matches_any(state, covers) ==> state_matches_any(state, expanded_covers)
+    {
+      assert !state_matches_any(state, covers);
+    }
+    assert forall state :: state_matches_any(state, covers) ==> state_matches_any(state, expanded_covers);
+    return {};
+  }*/
+  if covers == {} {
+    return {};
+  }
+  var first_cover :| first_cover in covers;
+  var first_cover_expanded := state_generalize_cover(first_cover, params, id);
+  var rest_covers := covers - {first_cover};
+  var rest_covers_expanded := generalize_each_cover(rest_covers, params, id+1);
+  expanded_covers := first_cover_expanded + rest_covers_expanded;
+  forall state {:trigger TriggerGeneralizeEachInternal(state, id) } | state_matches_any(state, covers)
+  ensures state_matches_any(state, covers) ==> state_matches_any(state, expanded_covers) {
+    var state_cover :| state_cover in covers && state_matches(state, state_cover);
+    if state_cover == first_cover {
+      // This is the hard part! But only a bit, I hope.
+      assert TriggerGeneralizeCover(state, id) == 0;
+      var new_state_cover :| new_state_cover in first_cover_expanded && state_matches(state, new_state_cover);
+    }
+  }
+  // assert forall state :: assert TriggerGeneralizeEach(state) == 0; state_matches_any(state, covers) ==> state_matches_any(state, expanded_covers);
+  return expanded_covers;
+}
+
+method regex_step_cover_generalize(program: Program, current: RegexState, params: GeneralizeParams) returns (valid: bool, next_cover: set<RegexState>)
+ensures valid ==> all_covering(program, current, next_cover)
+{
+  var single_valid, single_cover := regex_step_cover(program, current);
+  if !single_valid {
+    return false, {};
+  }
+
+  assert all_covering(program, current, single_cover);
+  next_cover := generalize_each_cover(single_cover, params, 0);
+  // assert all_covering(program, current, next_cover);
+  forall state: MachineState | state_matches(state, current)
+  ensures !machine_step(program, state).Halt? && exists cover: RegexState :: cover in next_cover && state_matches(machine_step(program, state).next_state, cover)
+  {
+    assert TriggerStateCover(state) == 0;
+    var old_cover :| old_cover in single_cover && state_matches(machine_step(program, state).next_state, old_cover);
+    assert TriggerGeneralizeEach(machine_step(program, state).next_state) == 0;
+    var new_cover :| new_cover in next_cover && state_matches(machine_step(program, state).next_state, old_cover);
+  }
+  return true, next_cover;
+}
+
 method regex_step_cover(program: Program, current: RegexState) returns (valid: bool, next_cover: set<RegexState>)
-ensures valid ==> forall state: MachineState | state_matches(state, current) :: !machine_step(program, state).Halt?
-ensures valid ==> forall state: MachineState | state_matches(state, current) :: exists cover: RegexState :: cover in next_cover && state_matches(machine_step(program, state).next_state, cover)
+// ensures valid ==> forall state: MachineState {:trigger TriggerStateCover(state) } | state_matches(state, current) :: !machine_step(program, state).Halt?
+// ensures valid ==> forall state: MachineState {:trigger TriggerStateCover(state) } | state_matches(state, current) :: exists cover: RegexState :: cover in next_cover && state_matches(machine_step(program, state).next_state, cover)
+ensures valid ==> all_covering(program, current, next_cover)
 {
 
   var current_input := ProgramStepInput(current.head_symbol, current.color);
@@ -939,7 +1170,7 @@ function TriggerDoneCoverNext(state: MachineState): nat {
   0
 }
 
-method regex_cycler_decider(program: Program, time_limit: nat) returns (result: bool)
+method regex_cycler_decider(program: Program, time_limit: nat, params: GeneralizeParams) returns (result: bool)
 ensures result ==> program_loops_forever(program)
 {
   var first_cover := initial_cover();
@@ -961,14 +1192,21 @@ ensures result ==> program_loops_forever(program)
     gas := gas + 1;
 
     var current: RegexState :| current in todo_pile;
+    print current;
+    print "\n";
     todo_pile := todo_pile - {current};
     done_pile := done_pile + {current};
 
 
-    var still_ok, new_covers := regex_step_cover(program, current);
+    var still_ok, new_covers := regex_step_cover_generalize(program, current, params);
     if !still_ok {
       // Failed to move forward.
       return false;
+    }
+    forall state: MachineState | state_matches(state, current)
+    ensures !machine_step(program, state).Halt?
+    {
+      assert TriggerStateCover(state) == 0;
     }
     todo_pile := todo_pile + new_covers;
 
@@ -979,9 +1217,12 @@ ensures result ==> program_loops_forever(program)
         exists todo_cover :: todo_cover in todo_pile+done_pile && state_matches(machine_step(program, state).next_state, todo_cover)
       {
         assert TriggerDoneCoverNext(state) == 0;
+        assert TriggerStateCover(state) == 0;
         // TODO
       }
     }
+
+    todo_pile := todo_pile - done_pile;
   }
 
   if todo_pile != {} {
@@ -1098,3 +1339,124 @@ ensures forall t: HalfTape | half_tape_matches(t, r) && head(t) == B1 :: half_ta
   }
 }
 
+
+function method color_from_char(s: char): Color {
+  match s {
+    case 'A' => CA
+    case 'B' => CB
+    case 'C' => CC
+    case 'D' => CD
+    case 'E' => CE
+    case _ => CA // Avoid
+  }
+}
+
+function method bit_from_char(s: char): Bit {
+  match s {
+    case '0' => B0
+    case '1' => B1
+    case _ => B0 // Avoid
+  }
+}
+
+function method dir_from_char(s: char): Direction {
+  match s {
+    case 'R' => R
+    case 'L' => L
+    case _ => R // Avoid
+  }
+}
+
+method from_string(desc: string) returns (program: Program)
+requires |desc| == 34 {
+  program := map[];
+  var col: Color;
+  var base: nat;
+  
+  base := 0;
+  col := CA;
+  if desc[base] != '-' {
+    program := program[ProgramStepInput(B0, col) := Action(bit_from_char(desc[base]), color_from_char(desc[base+2]), dir_from_char(desc[base+1]))];
+  }
+  if desc[base+3] != '-' {
+    program := program[ProgramStepInput(B1, col) := Action(bit_from_char(desc[base+3]), color_from_char(desc[base+5]), dir_from_char(desc[base+4]))];
+  }
+  base := 7;
+  col := CB;
+  if desc[base] != '-' {
+    program := program[ProgramStepInput(B0, col) := Action(bit_from_char(desc[base]), color_from_char(desc[base+2]), dir_from_char(desc[base+1]))];
+  }
+  if desc[base+3] != '-' {
+    program := program[ProgramStepInput(B1, col) := Action(bit_from_char(desc[base+3]), color_from_char(desc[base+5]), dir_from_char(desc[base+4]))];
+  }
+  base := 14;
+  col := CC;
+  if desc[base] != '-' {
+    program := program[ProgramStepInput(B0, col) := Action(bit_from_char(desc[base]), color_from_char(desc[base+2]), dir_from_char(desc[base+1]))];
+  }
+  if desc[base+3] != '-' {
+    program := program[ProgramStepInput(B1, col) := Action(bit_from_char(desc[base+3]), color_from_char(desc[base+5]), dir_from_char(desc[base+4]))];
+  }
+  base := 21;
+  col := CD;
+  if desc[base] != '-' {
+    program := program[ProgramStepInput(B0, col) := Action(bit_from_char(desc[base]), color_from_char(desc[base+2]), dir_from_char(desc[base+1]))];
+  }
+  if desc[base+3] != '-' {
+    program := program[ProgramStepInput(B1, col) := Action(bit_from_char(desc[base+3]), color_from_char(desc[base+5]), dir_from_char(desc[base+4]))];
+  }
+  base := 28;
+  col := CE;
+  if desc[base] != '-' {
+    program := program[ProgramStepInput(B0, col) := Action(bit_from_char(desc[base]), color_from_char(desc[base+2]), dir_from_char(desc[base+1]))];
+  }
+  if desc[base+3] != '-' {
+    program := program[ProgramStepInput(B1, col) := Action(bit_from_char(desc[base+3]), color_from_char(desc[base+5]), dir_from_char(desc[base+4]))];
+  }
+}
+
+method Main() {
+
+
+  // This is the current candidate for BB(5):
+  // 1RB1LC_1RC1RB_1RD0LE_1LA1LD_---0LA
+  // It runs for 47,176,870 steps and then halts.
+  // var busy_beaver_candidate: Program := from_string("1RB1LC_1RC1RB_1RD0LE_1LA1LD_---0LA");
+
+  // var program := from_string("1RB---_0RC0LE_1LD0LA_1LB1RB_1LC1RC"); // cycler
+  var program := from_string("1RB0LE_1LC1LA_1LD1LB_1RB---_0RE1RB"); // null-translated cycler
+
+  var result := regex_cycler_decider(program, 30, GeneralizeParams(
+    max_length := 0
+  ));
+
+  print "loops? ";
+  print result;
+  print "\n";
+  
+  /*
+
+  print busy_beaver_candidate;
+  print "\n";
+
+  var step_count;
+  var result;
+  
+  step_count := 47_176_869;
+  print "Run for ";
+  print step_count;
+  print " steps...\n-> halt? ";
+  result := machine_step_iterative(busy_beaver_candidate, initial, step_count);
+  print result.Halt?;
+  print "\n";
+
+  step_count := 47_176_870;
+  print "Run for ";
+  print step_count;
+  print " steps...\n-> halt? ";
+  result := machine_step_iterative(busy_beaver_candidate, initial, step_count);
+  print result.Halt?;
+  print "\n";
+  */
+  
+}
