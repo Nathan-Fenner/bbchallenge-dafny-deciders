@@ -777,3 +777,324 @@ predicate program_eventually_halts(program: Program) {
 predicate program_loops_forever(program: Program) {
   !program_eventually_halts(program)
 }
+
+// Now, more proof and implementation.
+
+datatype RegexState = RegexState(color: Color, head_symbol: Bit, left: Reg, right: Reg)
+
+predicate state_matches(state: MachineState, r: RegexState) {
+  state.color == r.color && state.head_symbol == r.head_symbol && half_tape_matches(state.left, r.left) && half_tape_matches(state.right, r.right)
+}
+
+method initial_cover() returns (cover: RegexState)
+ensures state_matches(initial, cover)
+{
+  cover := RegexState(color := CA, head_symbol := B0, left := Cat([]), right := Cat([]));
+  var n := 0;
+  assert drop_from_tape(HalfTape([]), n) == HalfTape([]);
+  assert take_from_tape(HalfTape([]), n) == [];
+  assert half_tape_matches(HalfTape([]), Cat([]));
+  assert half_tape_matches(initial.left, cover.left);
+  assert half_tape_matches(initial.right, cover.right);
+  return cover;
+}
+
+lemma cons_one_works(tape: HalfTape, r: Reg, b: Bit)
+requires half_tape_matches(tape, r)
+ensures half_tape_matches(cons(b, tape), cat(Lit(b), r))
+{
+  var n: nat :| drop_from_tape(tape, n) == HalfTape([]) && matches(take_from_tape(tape, n), r);
+  var bit_tape := cons(b, tape);
+  assert take_from_tape(bit_tape, n+1) == [b] + take_from_tape(tape, n);
+  catenating_matches_cat([b], take_from_tape(tape, n), Lit(b), r);
+  assert half_tape_matches(cons(b, tape), Cat([Lit(b), r]));
+  assert half_tape_matches(cons(b, tape), cat(Lit(b), r));
+}
+
+method regex_step_cover(program: Program, current: RegexState) returns (valid: bool, next_cover: set<RegexState>)
+ensures valid ==> forall state: MachineState | state_matches(state, current) :: !machine_step(program, state).Halt?
+ensures valid ==> forall state: MachineState | state_matches(state, current) :: exists cover: RegexState :: cover in next_cover && state_matches(machine_step(program, state).next_state, cover)
+{
+
+  var current_input := ProgramStepInput(current.head_symbol, current.color);
+  if current_input !in program {
+    // We reached a cover for at least one halting state. We cannot make progress.
+    return false, {};
+  }
+  var current_action := program[current_input];
+  forall state: MachineState | state_matches(state, current)
+  ensures !machine_step(program, state).Halt?
+  {
+    // Trivial!
+  }
+  match current_action.move {
+    case L => {
+      var peel_left := deriv_half_tape(current.left);
+
+      next_cover := {};
+      var cover0 := RegexState(
+        color := current_action.new_color,
+        head_symbol := B0,
+        left := peel_left.after_0,
+        right := cat(Lit(current_action.write), current.right)
+      );
+      var cover1 := RegexState(
+        color := current_action.new_color,
+        head_symbol := B1,
+        left := peel_left.after_1,
+        right := cat(Lit(current_action.write), current.right)
+      );
+      if peel_left.after_0 != Never {
+        next_cover := next_cover + {cover0};
+      }
+      if peel_left.after_1 != Never {
+        next_cover := next_cover + {cover1};
+      }
+      
+      forall state: MachineState | state_matches(state, current) && !machine_step(program, state).Halt?
+      ensures exists new_cover :: new_cover in next_cover && state_matches(machine_step(program, state).next_state, new_cover)
+      {
+        var next_state := MachineState(
+          color := current_action.new_color,
+          head_symbol := head(state.left),
+          left := tail(state.left),
+          right := cons(current_action.write, state.right)
+        );
+        assert machine_step(program, state).next_state == next_state;
+        if next_state.head_symbol == B0 {
+          assert half_tape_matches(next_state.left, peel_left.after_0);
+          assert peel_left.after_0 != Never;
+          assert half_tape_matches(state.right, current.right);
+          cons_one_works(state.right, current.right, current_action.write);
+          assert half_tape_matches(next_state.right, cat(Lit(current_action.write), current.right));
+          assert state_matches(next_state, cover0);
+        } else {
+          assert half_tape_matches(next_state.left, peel_left.after_1);
+          assert peel_left.after_1 != Never;
+          assert half_tape_matches(state.right, current.right);
+          cons_one_works(state.right, current.right, current_action.write);
+          assert half_tape_matches(next_state.right, cat(Lit(current_action.write), current.right));
+          assert state_matches(next_state, cover1);
+        }
+      }
+
+      return true, next_cover;
+    }
+    case R => {
+      var peel_right := deriv_half_tape(current.right);
+
+      next_cover := {};
+      var cover0 := RegexState(
+        color := current_action.new_color,
+        head_symbol := B0,
+        right := peel_right.after_0,
+        left := cat(Lit(current_action.write), current.left)
+      );
+      var cover1 := RegexState(
+        color := current_action.new_color,
+        head_symbol := B1,
+        right := peel_right.after_1,
+        left := cat(Lit(current_action.write), current.left)
+      );
+      if peel_right.after_0 != Never {
+        next_cover := next_cover + {cover0};
+      }
+      if peel_right.after_1 != Never {
+        next_cover := next_cover + {cover1};
+      }
+      
+      forall state: MachineState | state_matches(state, current) && !machine_step(program, state).Halt?
+      ensures exists new_cover :: new_cover in next_cover && state_matches(machine_step(program, state).next_state, new_cover)
+      {
+        var next_state := MachineState(
+          color := current_action.new_color,
+          head_symbol := head(state.right),
+          right := tail(state.right),
+          left := cons(current_action.write, state.left)
+        );
+        assert machine_step(program, state).next_state == next_state;
+        if next_state.head_symbol == B0 {
+          assert half_tape_matches(next_state.right, peel_right.after_0);
+          assert peel_right.after_0 != Never;
+          assert half_tape_matches(state.left, current.left);
+          cons_one_works(state.left, current.left, current_action.write);
+          assert half_tape_matches(next_state.left, cat(Lit(current_action.write), current.left));
+          assert state_matches(next_state, cover0);
+        } else {
+          assert half_tape_matches(next_state.right, peel_right.after_1);
+          assert peel_right.after_1 != Never;
+          assert half_tape_matches(state.left, current.left);
+          cons_one_works(state.left, current.left, current_action.write);
+          assert half_tape_matches(next_state.left, cat(Lit(current_action.write), current.left));
+          assert state_matches(next_state, cover1);
+        }
+      }
+
+      return true, next_cover;
+    }
+  }
+}
+
+function TriggerDoneCoverNext(state: MachineState): nat {
+  0
+}
+
+method regex_cycler_decider(program: Program, time_limit: nat) returns (result: bool)
+ensures result ==> program_loops_forever(program)
+{
+  var first_cover := initial_cover();
+  var todo_pile: set<RegexState> := {first_cover};
+  var done_pile: set<RegexState> := {};
+  
+
+  assert first_cover in todo_pile + done_pile;
+  var gas := 0;
+  while gas < time_limit && todo_pile != {}
+  // The initial state must be represented, so that our induction can conclude.
+  invariant exists cover :: cover in todo_pile+done_pile && state_matches(initial, cover)
+  // Each state covered by a "done" regex must not halt in one step...
+  invariant forall done_cover {:trigger done_cover in done_pile} | done_cover in done_pile :: forall state | state_matches(state, done_cover) :: !machine_step(program, state).Halt?
+  // and that next step needs to be covered by a regex that's either todo or already done.
+  invariant forall done_cover {:trigger done_cover in done_pile} | done_cover in done_pile :: forall state {:trigger TriggerDoneCoverNext(state)} | state_matches(state, done_cover) ::
+    exists todo_cover :: todo_cover in todo_pile+done_pile && state_matches(machine_step(program, state).next_state, todo_cover)
+  {
+    gas := gas + 1;
+
+    var current: RegexState :| current in todo_pile;
+    todo_pile := todo_pile - {current};
+    done_pile := done_pile + {current};
+
+
+    var still_ok, new_covers := regex_step_cover(program, current);
+    if !still_ok {
+      // Failed to move forward.
+      return false;
+    }
+    todo_pile := todo_pile + new_covers;
+
+    forall done_cover | done_cover in done_pile ensures forall state | state_matches(state, done_cover) ::
+    exists todo_cover :: todo_cover in todo_pile+done_pile && state_matches(machine_step(program, state).next_state, todo_cover) {
+      assert done_cover in done_pile;
+      forall state | state_matches(state, done_cover) ensures
+        exists todo_cover :: todo_cover in todo_pile+done_pile && state_matches(machine_step(program, state).next_state, todo_cover)
+      {
+        assert TriggerDoneCoverNext(state) == 0;
+        // TODO
+      }
+    }
+  }
+
+  if todo_pile != {} {
+    return false;
+  }
+  
+  forall done_cover: RegexState | done_cover in done_pile ensures forall covered_state :: state_matches(covered_state, done_cover) ==> (!machine_step(program, covered_state).Halt? && 
+    exists todo_cover :: todo_cover in done_pile && state_matches(machine_step(program, covered_state).next_state, todo_cover))
+  {
+    assert TriggerCoverNext(done_cover) == 0;
+    forall covered_state: MachineState ensures state_matches(covered_state, done_cover) ==> (!machine_step(program, covered_state).Halt? && 
+    exists todo_cover :: todo_cover in done_pile && state_matches(machine_step(program, covered_state).next_state, todo_cover))
+    {
+      assert TriggerDoneCoverNext(covered_state) == 0;
+    }
+  }
+  assert complete_pile(program, done_pile);
+  all_machines_loop(program, done_pile);
+
+  return true;
+}
+
+
+function TriggerCoverNext(done_cover: RegexState): nat {
+  0
+}
+
+predicate complete_pile(program: Program, fin_pile: set<RegexState>) {
+  (exists cover :: cover in fin_pile && state_matches(initial, cover)) &&
+  (forall done_cover: RegexState {:trigger TriggerCoverNext(done_cover)} :: done_cover in fin_pile ==> forall covered_state :: state_matches(covered_state, done_cover) ==> (!machine_step(program, covered_state).Halt? && 
+    exists todo_cover :: todo_cover in fin_pile && state_matches(machine_step(program, covered_state).next_state, todo_cover)))
+}
+
+lemma all_machines_loop_induct(program: Program, fin_pile: set<RegexState>, n: nat)
+requires complete_pile(program, fin_pile)
+ensures !machine_iter_n(program, n).Halt? && exists next_cover :: next_cover in fin_pile && state_matches(machine_iter_n(program, n).next_state, next_cover)
+{
+  if n == 0 {
+    assert machine_iter_n(program, 0).next_state == initial;
+    var init_cover :| init_cover in fin_pile && state_matches(initial, init_cover);
+    assert !machine_iter_n(program, n).Halt?;
+    assert exists next_cover :: next_cover in fin_pile && state_matches(machine_iter_n(program, n).next_state, next_cover);
+    return;
+  }
+  all_machines_loop_induct(program, fin_pile, n-1);
+  var my_cover: RegexState :| my_cover in fin_pile && state_matches(machine_iter_n(program, n-1).next_state, my_cover);
+  assert TriggerCoverNext(my_cover) == 0;
+  assert !machine_iter_n(program, n).Halt?;
+  assert exists next_cover :: next_cover in fin_pile && state_matches(machine_iter_n(program, n).next_state, next_cover);
+}
+
+lemma all_machines_loop(program: Program, fin_pile: set<RegexState>)
+requires complete_pile(program, fin_pile)
+ensures forall each_n: nat :: !machine_iter_n(program, each_n).Halt?
+{
+  forall n: nat
+  ensures !machine_iter_n(program, n).Halt?
+  {
+    all_machines_loop_induct(program, fin_pile, n);
+  }
+}
+
+
+datatype HalfTapeDeriv = HalfTapeDeriv(after_0: Reg, after_1: Reg)
+
+method deriv_half_tape(r: Reg) returns (result: HalfTapeDeriv)
+ensures forall t: HalfTape | half_tape_matches(t, r) && head(t) == B0 :: half_tape_matches(tail(t), result.after_0)
+ensures forall t: HalfTape | half_tape_matches(t, r) && head(t) == B1 :: half_tape_matches(tail(t), result.after_1)
+{
+  var d := deriv_of(r);
+  result := HalfTapeDeriv(
+    after_0 := if d.can_be_empty then alt(Cat([]), d.after_0) else d.after_0,
+    after_1 := d.after_1
+  );
+  forall t: HalfTape | half_tape_matches(t, r) && head(t) == B1
+  ensures half_tape_matches(tail(t), result.after_1) {
+    var n: nat :| drop_from_tape(t, n) == HalfTape([]) && matches(take_from_tape(t, n), r);
+    var lead := take_from_tape(t, n);
+    assert t.initial[0] == B1;
+    assert tail(t) == HalfTape(t.initial[1..]);
+    if lead == [] {
+      assert d.can_be_empty;
+      assert half_tape_matches(tail(t), Cat([]));
+      assert half_tape_matches(tail(t), result.after_1);
+    } else {
+      assert lead[0] == B1;
+      assert matches(lead, r);
+      assert matches(lead[1..], d.after_1);
+      assert take_from_tape(tail(t), n-1) == lead[1..];
+      assert drop_from_tape(tail(t), n-1) == HalfTape([]);
+      assert half_tape_matches(tail(t), d.after_1);
+      assert half_tape_matches(tail(t), result.after_1);
+    }
+  }
+  forall t: HalfTape | half_tape_matches(t, r) && head(t) == B0
+  ensures half_tape_matches(tail(t), result.after_0) {
+    var n: nat :| drop_from_tape(t, n) == HalfTape([]) && matches(take_from_tape(t, n), r);
+    var lead := take_from_tape(t, n);
+    assert t.initial == [] || t.initial[0] == B0;
+    assert tail(t) == HalfTape([]) || tail(t) == HalfTape(t.initial[1..]);
+    if lead == [] {
+      assert d.can_be_empty;
+      assert half_tape_matches(tail(t), Cat([]));
+      assert half_tape_matches(tail(t), result.after_0);
+    } else {
+      assert lead[0] == B0;
+      assert matches(lead, r);
+      assert matches(lead[1..], d.after_0);
+      assert take_from_tape(tail(t), n-1) == lead[1..];
+      assert drop_from_tape(tail(t), n-1) == HalfTape([]);
+      assert half_tape_matches(tail(t), d.after_0);
+      assert half_tape_matches(tail(t), result.after_0);
+    }
+  }
+}
+
