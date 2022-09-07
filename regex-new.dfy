@@ -1,5 +1,19 @@
 datatype Bit = B0 | B1
-datatype Reg = Cat(items: seq<Reg>) | Lit(Bit)| Plus(rep: Reg) | Alt(first: Reg, second: Reg) | Never | Any
+datatype Reg = Cat(items: seq<Reg>) | Lit(bit: Bit)| Plus(rep: Reg) | Alt(first: Reg, second: Reg) | Never | Any
+
+
+function method reg_to_string(r: Reg): string 
+decreases reg_size(r)
+{
+  match r {
+    case Cat(items) => if |items| == 0 then "" else assert reg_size(items[0]) < reg_size(r); reg_to_string(items[0]) + reg_to_string(Cat(items[1..]))
+    case Lit(_) => if r.bit == B0 then "0" else "1"
+    case Alt(_, _) => "(" + reg_to_string(r.first) + "|" + reg_to_string(r.second) + ")"
+    case Never => "never"
+    case Any => "any"
+    case Plus(_) => "(" + reg_to_string(r.rep) + ")+"
+  }
+}
 
 function method cat(a: Reg, b: Reg): Reg {
   match (a, b) {
@@ -553,7 +567,9 @@ datatype GeneralizeParams = GeneralizeParams(
   // The maximum number of items allowed to appear in the outermost Cat.
   // If set to 0, no effect.
   // If not zero and more than `max_length` items appear, everything after `max_length-1` is replaced by `Any`.
-  max_length: nat
+  max_length: nat,
+  min_repeat: nat,
+  min_make_repeat: nat
 )
 
 // This lemma proves that if you replace some middle section of a Cat with a different regex,
@@ -750,6 +766,17 @@ ensures matches(ta, Cat([Plus(r)]))
   catenating_matches_single(ta, Plus(r));
 }
 
+lemma preserve_match_plusr_r_as_seq(ta: seq<Bit>, rs: seq<Reg>)
+requires matches(ta, Cat([Plus(Cat(rs))] + rs))
+ensures matches(ta, Cat([Plus(Cat(rs))]))
+{
+  cat_n_split(ta,  [Plus(Cat(rs))] + rs, 1);
+  var split :| 0 <= split <= |ta| && matches(ta[..split], Plus(Cat(rs))) && matches(ta[split..], Cat(rs));
+  catenating_matches_cat(ta[..split], ta[split..], Plus(Cat(rs)), Cat(rs));
+  assert ta[..split] + ta[split..] == ta;
+  assert matches(ta, Cat([Plus(Cat(rs)), Cat(rs)]));
+  preserve_match_plusr_r(ta, Cat(rs));
+}
 
 lemma preserve_match_r_plusr(ta: seq<Bit>, r: Reg)
 requires matches(ta, Cat([r, Plus(r)]))
@@ -772,6 +799,7 @@ ensures matches(ta, Cat([Plus(Cat(rs))]))
   preserve_match_r_plusr(ta, Cat(rs));
 }
 
+
 // This function allows us to move beyond just listing neighborhoods as finite strings.
 // Specifically, we want to convert long finite regexes into short "classy" ones.
 method generalize_cover(r: Reg, params: GeneralizeParams) returns (covers: set<Reg>)
@@ -792,31 +820,6 @@ ensures forall tape: HalfTape :: half_tape_matches(tape, r) ==> exists cover :: 
   }
 
   if r.Cat? {
-    {
-      var i := 0;
-      while i < |r.items| {
-        if r.items[i].Plus?
-          && r.items[i].rep.Cat?
-          && i >= |r.items[i].rep.items|
-          && r.items[i - |r.items[i].rep.items| .. i] == r.items[i].rep.items
-        {
-          // We have Plus(Cat(cs)) preceded immediately by cs.
-          // Remove the cs, retain the plus.
-          var fixed := Cat(r.items[..i - |r.items[i].rep.items|] + [r.items[i]] + r.items[i+1..]);
-          forall tape | matches(tape, Cat(r.items[i-|r.items[i].rep.items|..i+1]))
-          ensures matches(tape, Cat([r.items[i]])) {
-            assert Cat(r.items[i-|r.items[i].rep.items|..i+1])
-              == Cat(r.items[i-|r.items[i].rep.items|..i] + [r.items[i]]);
-            preserve_match_r_plusr_as_seq(tape, r.items[i].rep.items);
-          }
-          cat_replace(r.items, i - |r.items[i].rep.items|, i+1, [r.items[i]]);
-          return { fixed };
-        }
-        i := i + 1;
-      }
-    }
-
-
     if |r.items| >= 1 && r.items[|r.items|-1] == Lit(B0) {
       var shorter := Cat(r.items[..|r.items|-1]);
       can_trim_0(r);
@@ -826,6 +829,104 @@ ensures forall tape: HalfTape :: half_tape_matches(tape, r) ==> exists cover :: 
       covers := generalize_cover(shorter, params);
       return covers;
     }
+
+    {
+      var i := 0;
+      while i < |r.items| {
+        if r.items[i].Plus?
+          && r.items[i].rep.Cat?
+          && i >= |r.items[i].rep.items| >= 1
+          && r.items[i - |r.items[i].rep.items| .. i] == r.items[i].rep.items
+        {
+          // We have Plus(Cat(cs)) preceded immediately by cs.
+          // Remove the cs, retain the plus.
+          var lo_cut := i - |r.items[i].rep.items|;
+          var hi_cut := i + 1;
+          var fixed := Cat(r.items[..i - |r.items[i].rep.items|] + [r.items[i]] + r.items[i+1..]);
+          forall tape | matches(tape, Cat(r.items[i-|r.items[i].rep.items|..i+1]))
+          ensures matches(tape, Cat([r.items[i]])) {
+            assert Cat(r.items[i-|r.items[i].rep.items|..i+1])
+              == Cat(r.items[i-|r.items[i].rep.items|..i] + [r.items[i]]);
+            preserve_match_r_plusr_as_seq(tape, r.items[i].rep.items);
+          }
+          assert hi_cut - 1 >= lo_cut;
+          assert |r.items[lo_cut..hi_cut]| == hi_cut - lo_cut;
+          assert hi_cut >= 1;
+          reg_sum_size_split(r.items[lo_cut..hi_cut], hi_cut - lo_cut - 1);
+          assert r.items[hi_cut-1..hi_cut] == r.items[lo_cut..hi_cut][hi_cut-lo_cut-1..];
+          assert [r.items[hi_cut-1]] == r.items[hi_cut-1..hi_cut];
+          assert r.items[lo_cut..hi_cut-1] == r.items[lo_cut..hi_cut][..hi_cut-lo_cut-1];
+          assert reg_sum_size(r.items[lo_cut..hi_cut]) == reg_sum_size(r.items[lo_cut..hi_cut-1]) + reg_sum_size([r.items[hi_cut-1]]) - 1;
+
+          assert (reg_sum_size(r.items[lo_cut..hi_cut]) > reg_sum_size([r.items[i]]));
+          cat_replace(r.items, lo_cut, hi_cut, [r.items[i]]);
+          assert reg_size(fixed) < reg_size(r);
+          forall tape: HalfTape ensures half_tape_matches(tape, r) ==> half_tape_matches(tape, fixed)
+          {
+            //
+          }
+          var fixed_expanded := generalize_cover(fixed, params);
+          return fixed_expanded;
+        }
+        if r.items[i].Plus?
+          && r.items[i].rep.Cat?
+          && |r.items[i].rep.items| >= 1
+          && i + 1 + |r.items[i].rep.items| <= |r.items|
+          && r.items[i + 1..i + 1 + |r.items[i].rep.items|] == r.items[i].rep.items
+        {
+          // We have Plus(Cat(cs)) followed immediately by cs.
+          // Remove the cs, retain the plus.
+          var lo_cut := i;
+          var hi_cut := i + 1 + |r.items[i].rep.items|;
+          var fixed := Cat(r.items[..lo_cut] + [r.items[i]] + r.items[hi_cut..]);
+          forall tape | matches(tape, Cat(r.items[lo_cut..hi_cut]))
+          ensures matches(tape, Cat([r.items[i]])) {
+            assert lo_cut+1 <= hi_cut;
+            // ..
+            // assert r.items[lo_cut..hi_cut] == r.items[lo_cut..lo_cut+1] + r.items[lo_cut+1..hi_cut];
+            assert r.items[lo_cut..lo_cut+1] == [r.items[i]];
+            assert Cat(r.items[lo_cut..hi_cut])
+              == Cat([r.items[i]] + r.items[i+1..hi_cut]);
+            preserve_match_plusr_r_as_seq(tape, r.items[i].rep.items);
+          }
+          assert hi_cut - 1 >= lo_cut;
+          assert |r.items[lo_cut..hi_cut]| == hi_cut - lo_cut;
+          assert hi_cut >= 1;
+          reg_sum_size_split(r.items[lo_cut..hi_cut], 1);
+          assert r.items[lo_cut..hi_cut][1..] == r.items[lo_cut+1..hi_cut];
+          assert |r.items[lo_cut..hi_cut]| >= 1;
+          assert r.items[lo_cut..hi_cut][..1] == r.items[lo_cut..lo_cut+1];
+          assert reg_sum_size(r.items[lo_cut..hi_cut]) == reg_sum_size(r.items[lo_cut..lo_cut+1]) + reg_sum_size(r.items[lo_cut+1..hi_cut]) - 1;
+          assert r.items[lo_cut..lo_cut+1] == [r.items[i]];
+          // assert r.items[hi_cut-1..hi_cut] == r.items[lo_cut..hi_cut][hi_cut-lo_cut-1..];
+          // assert [r.items[hi_cut-1]] == r.items[hi_cut-1..hi_cut];
+          // assert r.items[lo_cut..hi_cut-1] == r.items[lo_cut..hi_cut][..hi_cut-lo_cut-1];
+          // assert reg_sum_size(r.items[lo_cut..hi_cut]) == reg_sum_size(r.items[lo_cut..hi_cut-1]) + reg_sum_size([r.items[hi_cut-1]]) - 1;
+          assert r.items[lo_cut..hi_cut] == r.items[lo_cut..lo_cut+1] + r.items[lo_cut+1..hi_cut];
+          assert r.items[lo_cut..hi_cut] == [r.items[i]] + r.items[lo_cut+1..hi_cut];
+
+          assert hi_cut >= lo_cut + 1;
+          assert |r.items[lo_cut+1..hi_cut]| >= 1;
+          assert reg_sum_size(r.items[lo_cut+1..hi_cut]) == reg_size(r.items[lo_cut+1..hi_cut][0]) + 1 + reg_sum_size(r.items[lo_cut+1..hi_cut][1..]);
+          assert reg_sum_size(r.items[lo_cut+1..hi_cut]) - 1 > 0;
+          assert reg_sum_size([r.items[i]]) + reg_sum_size(r.items[lo_cut+1..hi_cut]) - 1 > reg_sum_size([r.items[i]]);
+          assert reg_sum_size(r.items[lo_cut..lo_cut+1]) + reg_sum_size(r.items[lo_cut+1..hi_cut]) - 1 > reg_sum_size([r.items[i]]);
+          assert (reg_sum_size(r.items[lo_cut..hi_cut]) > reg_sum_size([r.items[i]]));
+          cat_replace(r.items, lo_cut, hi_cut, [r.items[i]]);
+          assert reg_size(fixed) < reg_size(r);
+          forall tape: HalfTape ensures half_tape_matches(tape, r) ==> half_tape_matches(tape, fixed)
+          {
+            //
+          }
+          var fixed_expanded := generalize_cover(fixed, params);
+          return fixed_expanded;
+        }
+        i := i + 1;
+      }
+    }
+
+
+
 
     // If there is a Plus(r) next to an r, combine them together.
 
@@ -903,43 +1004,45 @@ ensures forall tape: HalfTape :: half_tape_matches(tape, r) ==> exists cover :: 
     }
 
     var i := 0;
-    var min_repeat := 4;
-    while i < |r.items| {
-      var group_size := 1;
-      while i + group_size * min_repeat <= |r.items| {
-        // If there are min_repeat duplicates, starting from i,
-        // then replace the last with a Plus.
+    var min_repeat := params.min_repeat;
+    if min_repeat >= 2 {
+      while i < |r.items| {
+        var group_size := if params.min_make_repeat >= 1 then params.min_make_repeat else 1;
+        while i + group_size * min_repeat <= |r.items| {
+          // If there are min_repeat duplicates, starting from i,
+          // then replace the last with a Plus.
 
-        var all_same := true;
-        var j := 0;
-        while j < min_repeat && all_same {
-          if r.items[i + j*group_size..i + (j+1)*group_size] != r.items[i..i+group_size] {
-            all_same := false;
+          var all_same := true;
+          var j := 0;
+          while j < min_repeat && all_same {
+            if r.items[i + j*group_size..i + (j+1)*group_size] != r.items[i..i+group_size] {
+              all_same := false;
+            }
+            j := j + 1;
           }
-          j := j + 1;
-        }
 
-        if all_same {
-          var remove_start := i;
-          var remove_end := i + group_size;
+          if all_same {
+            var remove_start := i;
+            var remove_end := i + group_size;
 
-          var new_plus := Plus(Cat(r.items[remove_start..remove_end]));
-          forall tape | matches(tape, Cat(r.items[remove_start..remove_end]))
-          ensures matches(tape, Cat([new_plus]))
-          {
-            catenating_matches_single(tape, new_plus);
+            var new_plus := Plus(Cat(r.items[remove_start..remove_end]));
+            forall tape | matches(tape, Cat(r.items[remove_start..remove_end]))
+            ensures matches(tape, Cat([new_plus]))
+            {
+              catenating_matches_single(tape, new_plus);
+            }
+            cat_replace(r.items, remove_start, remove_end, [new_plus]);
+            // Add in a plus at the beginning.
+            // TODO: If there is a plus right before this, should we also remove that one?
+            // Or will that just not happen?
+            return {
+              Cat(r.items[..remove_start] + [new_plus] + r.items[remove_end..])
+            };
           }
-          cat_replace(r.items, remove_start, remove_end, [new_plus]);
-          // Add in a plus at the beginning.
-          // TODO: If there is a plus right before this, should we also remove that one?
-          // Or will that just not happen?
-          return {
-            Cat(r.items[..remove_start] + [new_plus] + r.items[remove_end..])
-          };
+          group_size := group_size + 1;
         }
-        group_size := group_size + 1;
+        i := i + 1;
       }
-      i := i + 1;
     }
 
 
@@ -1410,11 +1513,17 @@ ensures result ==> program_loops_forever(program)
     gas := gas + 1;
 
     var current: RegexState :| current in todo_pile;
-    print "left: ";
-    print current.left;
+    print "---\n";
+    print "state: ";
+    print current.color;
+    print " ";
+    print current.head_symbol;
     print "\n";
-    print "right: ";
-    print current.right;
+    print "  left: ";
+    print reg_to_string(current.left);
+    print "\n";
+    print "  right: ";
+    print reg_to_string(current.right);
     print "\n";
     todo_pile := todo_pile - {current};
     done_pile := done_pile + {current};
@@ -1647,10 +1756,15 @@ method Main() {
 
   // var program := from_string("1RB---_0RC0LE_1LD0LA_1LB1RB_1LC1RC"); // cycler
   // var program := from_string("1RB0LE_1LC1LA_1LD1LB_1RB---_0RE1RB"); // null-translated cycler
-  var program := from_string("1RB---_0RC0LB_1RD0RE_1LE1RD_1LC1LB");
+  // var program := from_string("1RB---_0RC0LB_1RD0RE_1LE1RD_1LC1LB");
+  // var program := from_string("1RB0LE_1LC0RD_---1LD_1RE0LA_1LA0RE"); // fails
+  var program := from_string("1RB1LA_0LC0RB_0LD0LB_1RE---_1LE1LA");
+  
 
-  var result := regex_cycler_decider(program, 100, GeneralizeParams(
-    max_length := 0
+  var result := regex_cycler_decider(program, 1_000, GeneralizeParams(
+    max_length := 10,
+    min_repeat := 24,
+    min_make_repeat := 4
   ));
 
   print "loops? ";
