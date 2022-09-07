@@ -1557,6 +1557,9 @@ ensures result ==> program_loops_forever(program)
   }
 
   if todo_pile != {} {
+    print "failed to verify; todo pile still has ";
+    print |todo_pile|;
+    print " items\n";
     return false;
   }
   
@@ -1760,8 +1763,7 @@ method Main() {
   // var program := from_string("1RB0LE_1LC0RD_---1LD_1RE0LA_1LA0RE"); // fails
   var program := from_string("1RB1LA_0LC0RB_0LD0LB_1RE---_1LE1LA");
   
-
-  var result := regex_cycler_decider(program, 1_000, GeneralizeParams(
+  var result := regex_cycler_decider(program, 10_000, GeneralizeParams(
     max_length := 10,
     min_repeat := 24,
     min_make_repeat := 4
