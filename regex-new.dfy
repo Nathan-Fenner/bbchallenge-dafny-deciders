@@ -209,6 +209,7 @@ function method alt(a: Reg, b: Reg): Reg {
   match (a, b) {
     case (Any, _) => Any
     case (_, Any) => Any
+    case (Never, Never) => Never
     case (Never, b) => b
     case (a, Never) => a
     case _ => Alt(a, b)
@@ -331,8 +332,8 @@ ensures forall t: seq<Bit> | t != [] && t[0] == B1 && matches(t, r) :: matches(t
       var drep := deriv_of(rep);
       result := Deriv(
         can_be_empty := drep.can_be_empty,
-        after_0 := Alt(drep.after_0, cat(drep.after_0, Plus(rep))),
-        after_1 := Alt(drep.after_1, cat(drep.after_1, Plus(rep)))
+        after_0 := alt(drep.after_0, cat(drep.after_0, Plus(rep))),
+        after_1 := alt(drep.after_1, cat(drep.after_1, Plus(rep)))
       );
       cat_works(drep.after_0, Plus(rep));
       cat_works(drep.after_1, Plus(rep));
@@ -380,8 +381,8 @@ ensures forall t: seq<Bit> | t != [] && t[0] == B1 && matches(t, r) :: matches(t
       var db := deriv_of(b);
       return Deriv(
         can_be_empty := da.can_be_empty || db.can_be_empty,
-        after_0 := Alt(da.after_0, db.after_0),
-        after_1 := Alt(da.after_1, db.after_1)
+        after_0 := alt(da.after_0, db.after_0),
+        after_1 := alt(da.after_1, db.after_1)
       );
     }
     case Cat(list) => {
@@ -641,19 +642,19 @@ ensures forall tape: HalfTape | half_tape_matches(tape, r) :: half_tape_matches(
   }
 }
 
-function TriggerGeneralizeCover(state: MachineState, id: nat): nat {
+function TriggerGeneralizeCover(r: RegexState, state: MachineState): nat {
   0
 }
 
-method state_generalize_cover(r: RegexState, params: GeneralizeParams, id: nat) returns (covers: set<RegexState>)
-ensures forall state: MachineState {:trigger TriggerGeneralizeCover(state, id)} :: state_matches(state, r) ==> exists cover :: cover in covers && state_matches(state, r)
+method state_generalize_cover(r: RegexState, params: GeneralizeParams) returns (covers: set<RegexState>)
+ensures forall state: MachineState {:trigger TriggerGeneralizeCover(r, state)} :: state_matches(state, r) ==> exists cover :: cover in covers && state_matches(state, cover)
 {
   var left_covers := generalize_cover(r.left, params);
   var right_covers := generalize_cover(r.right, params);
 
   covers := set left, right | left in left_covers && right in right_covers :: RegexState(color := r.color, head_symbol := r.head_symbol, left := left, right := right);
   forall state: MachineState | state_matches(state, r)
-  ensures exists cover :: cover in covers && state_matches(state, r)
+  ensures exists cover :: cover in covers && state_matches(state, cover)
   {
     var left_cover :| left_cover in left_covers && half_tape_matches(state.left, left_cover);
     var right_cover :| right_cover in right_covers && half_tape_matches(state.right, right_cover);
@@ -980,42 +981,82 @@ predicate state_matches_any(state: MachineState, covers: set<RegexState>) {
   exists cover :: cover in covers && state_matches(state, cover)
 }
 
+lemma prove_state_matches_any(state: MachineState, covers: set<RegexState>, cover: RegexState)
+requires cover in covers && state_matches(state, cover)
+ensures state_matches_any(state, covers)
+{
+
+}
+
 function TriggerGeneralizeEachInternal(state: MachineState, id: nat): nat {
   0
+}
+
+function TriggerMergeGen(state: MachineState): nat {
+  0
+}
+
+method generalize_merge(covers1: set<RegexState>, covers2: set<RegexState>) returns (result: set<RegexState>)
+ensures forall state {:trigger TriggerMergeGen(state)} :: (state_matches_any(state, covers1) || state_matches_any(state, covers2)) ==> state_matches_any(state, result)
+{
+  result := covers1 + covers2;
+  return result;
+}
+
+method my_state_generalize_cover(original: RegexState, params: GeneralizeParams, id: nat)
+returns (result: set<RegexState>)
+ensures forall state {:trigger TriggerGeneralizeEach(state)} :: state_matches_any(state, {original}) ==> state_matches_any(state, result)
+{
+  result := state_generalize_cover(original, params);
+  forall state | state_matches_any(state, {original})
+  ensures state_matches_any(state, result)
+  {
+    assert exists cover :: cover in {original} && state_matches(state, cover);
+    assert TriggerGeneralizeCover(original, state) == 0;
+
+
+
+
+    assert state_matches(state, original);
+    assert state_matches(state, original) ==> exists cover :: cover in result && state_matches(state, cover);
+    assert exists cover :: cover in result && state_matches(state, cover);
+    var ans_cover :| ans_cover in result && state_matches(state, ans_cover);
+    assert state_matches(state, ans_cover);
+    prove_state_matches_any(state, result, ans_cover);
+    assert state_matches_any(state, result);
+  }
+  return result;
 }
 
 method generalize_each_cover(covers: set<RegexState>, params: GeneralizeParams, id: nat)
 returns (expanded_covers: set<RegexState>)
 ensures forall state {:trigger TriggerGeneralizeEach(state)} :: state_matches_any(state, covers) ==> state_matches_any(state, expanded_covers)
 {
-  /*
-  if covers == {} {
-    forall state
-    ensures state_matches_any(state, covers) ==> state_matches_any(state, expanded_covers)
-    {
-      assert !state_matches_any(state, covers);
-    }
-    assert forall state :: state_matches_any(state, covers) ==> state_matches_any(state, expanded_covers);
-    return {};
-  }*/
-  if covers == {} {
+  if |covers| == 0 {
     return {};
   }
   var first_cover :| first_cover in covers;
-  var first_cover_expanded := state_generalize_cover(first_cover, params, id);
+  var first_expanded := state_generalize_cover(first_cover, params);
+  
   var rest_covers := covers - {first_cover};
-  var rest_covers_expanded := generalize_each_cover(rest_covers, params, id+1);
-  expanded_covers := first_cover_expanded + rest_covers_expanded;
-  forall state {:trigger TriggerGeneralizeEachInternal(state, id) } | state_matches_any(state, covers)
-  ensures state_matches_any(state, covers) ==> state_matches_any(state, expanded_covers) {
-    var state_cover :| state_cover in covers && state_matches(state, state_cover);
-    if state_cover == first_cover {
-      // This is the hard part! But only a bit, I hope.
-      assert TriggerGeneralizeCover(state, id) == 0;
-      var new_state_cover :| new_state_cover in first_cover_expanded && state_matches(state, new_state_cover);
+  var rest_expanded := generalize_each_cover(rest_covers, params, id+1);
+  expanded_covers := first_expanded + rest_expanded;
+  forall state | state_matches_any(state, covers)
+  ensures state_matches_any(state, expanded_covers)
+  {
+    assert TriggerGeneralizeCover(first_cover, state) == 0;
+    assert TriggerGeneralizeEach(state) == 0;
+    var state_original_cover :| state_original_cover in covers && state_matches(state, state_original_cover);
+    if state_original_cover == first_cover {
+      var first_expanded_cover :| first_expanded_cover in first_expanded && state_matches(state, first_expanded_cover);
+      assert first_expanded_cover in expanded_covers;
+    } else {
+      var rest_cover :| rest_cover in rest_covers && state_matches(state, rest_cover);
+      var rest_expanded_cover :| rest_expanded_cover in rest_expanded && state_matches(state, rest_expanded_cover);
+      assert rest_expanded_cover in expanded_covers;
     }
+    
   }
-  // assert forall state :: assert TriggerGeneralizeEach(state) == 0; state_matches_any(state, covers) ==> state_matches_any(state, expanded_covers);
   return expanded_covers;
 }
 
