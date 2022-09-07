@@ -224,6 +224,18 @@ ensures forall t: seq<Bit> :: matches(t, Alt(a, b)) ==> matches(t, alt(a, b))
 function reg_sum_size(rs: seq<Reg>): nat {
   if rs == [] then 1 else reg_size(rs[0]) + 1 + reg_sum_size(rs[1..])
 }
+// |[a, b, c]|
+// = |a| + 1 + size[b,c]
+// = |a|+1 + |b| + 1 + |[c]|
+// = |a| + 1 + |b| + 1 + |c| + 1 + |[]|
+// = |a| + 1 + |b| + 1 + |c| + 1 + 1
+// |[a, b]|
+// = |a| + 1 + |[b]|
+// = |a| + 1 + |b| + 1 + |[]|
+// = |a| + 1 + |b| + 1 + 1
+// |[c]|
+// = |c| + 1 + |[]|
+// = |c| + 1 + 1
 
 function reg_size(r: Reg): nat {
   match r {
@@ -550,6 +562,7 @@ lemma cat_replace(whole: seq<Reg>, lo: nat, hi: nat, new_range: seq<Reg>)
 requires 0 <= lo <= hi <= |whole|
 requires forall tape: seq<Bit> | matches(tape, Cat(whole[lo..hi])) :: matches(tape, Cat(new_range))
 ensures forall tape: seq<Bit> | matches(tape, Cat(whole)) :: matches(tape, Cat(whole[..lo] + new_range + whole[hi..]))
+ensures (reg_sum_size(whole[lo..hi]) > reg_sum_size(new_range)) ==> (reg_size(Cat(whole)) > reg_size(Cat(whole[..lo] + new_range + whole[hi..])))
 {
   forall tape: seq<Bit> | matches(tape, Cat(whole))
   ensures matches(tape, Cat(whole[..lo] + new_range + whole[hi..]))
@@ -568,6 +581,53 @@ ensures forall tape: seq<Bit> | matches(tape, Cat(whole)) :: matches(tape, Cat(w
     assert tape[..n1+n2] + tape[n1..][n2..] == tape;
     catenating_seqs_matches_cat(tape[..n1+n2], tape[n1+n2..], whole[..lo] + new_range, whole[hi..]);
   }
+  
+  if (reg_sum_size(whole[lo..hi]) > reg_sum_size(new_range)) {
+    lem_reg_sum_size_shrink(whole, lo, hi, new_range);
+  }
+}
+
+lemma reg_sum_size_split(whole: seq<Reg>, n: nat)
+requires 0 <= n <= |whole|
+ensures reg_sum_size(whole[..n]) + reg_sum_size(whole[n..]) - 1 == reg_sum_size(whole)
+{
+  if n == 0 {
+    // assert reg_sum_size(whole) == reg_size(whole[0]) + 1 + reg_sum_size(whole[1..]);
+    assert reg_sum_size(whole[..n]) + reg_sum_size(whole[n..]) - 1 == reg_sum_size(whole);
+  } else {
+    reg_sum_size_split(whole[1..], n-1);
+    assert reg_sum_size(whole[1..][..n-1]) + reg_sum_size(whole[1..][n-1..]) - 1 == reg_sum_size(whole[1..]);
+    assert reg_sum_size(whole) == reg_size(whole[0]) + 1 + reg_sum_size(whole[1..]);
+    assert whole[1..][..n-1] == whole[1..n];
+    assert whole[1..][n-1..] == whole[n..];
+    assert reg_sum_size(whole[..n]) + reg_sum_size(whole[n..]) - 1 == reg_sum_size(whole);
+  }
+}
+
+lemma lem_reg_sum_size_shrink(whole: seq<Reg>, lo: nat, hi: nat, new_range: seq<Reg>)
+requires 0 <= lo <= hi <= |whole|
+requires reg_sum_size(whole[lo..hi]) > reg_sum_size(new_range)
+ensures reg_size(Cat(whole)) > reg_size(Cat(whole[..lo] + new_range + whole[hi..]))
+{
+
+  reg_sum_size_split(whole, lo);
+  var rest := whole[lo..];
+  reg_sum_size_split(rest, hi - lo);
+  assert whole[lo..][..hi-lo] == whole[lo..hi];
+  assert whole[lo..][hi-lo..] == whole[hi..];
+  assert reg_sum_size(whole) == reg_sum_size(whole[..lo]) + reg_sum_size(whole[hi..]) + reg_sum_size(whole[lo..hi]) - 2;
+
+  var replaced := whole[..lo] + new_range + whole[hi..];
+  assert replaced[lo..lo+|new_range|] == new_range;
+  reg_sum_size_split(replaced, lo);
+  var rest_replaced := replaced[lo..];
+  reg_sum_size_split(rest_replaced, |new_range|);
+  assert rest_replaced[..|new_range|] == new_range;
+  assert rest_replaced[|new_range|..] == whole[hi..];
+  assert replaced[..lo] == whole[..lo];
+  assert replaced[lo+|new_range|..] == whole[hi..];
+  assert reg_sum_size(replaced) == reg_sum_size(whole[..lo]) + reg_sum_size(whole[hi..]) + reg_sum_size(new_range) - 2;
+
 }
 
 lemma take_from_tape_length(tape: HalfTape, n: nat)
@@ -664,6 +724,54 @@ ensures forall state: MachineState {:trigger TriggerGeneralizeCover(r, state)} :
   }
 }
 
+
+
+function TriggerGeneralizeAlt(tape: HalfTape): nat { 0 }
+
+lemma preserve_match_plusr_r(ta: seq<Bit>, r: Reg)
+requires matches(ta, Cat([Plus(r), r]))
+ensures matches(ta, Plus(r))
+ensures matches(ta, Cat([Plus(r)]))
+{
+  var mid :| 0 <= mid <= |ta| && matches(ta[..mid], Plus(r)) && matches(ta[mid..], Cat([r]));
+  assert matches(ta[mid..], Cat([r]));
+  catenating_matches_single_rev(ta[mid..], r);
+  assert matches(ta[mid..], r);
+
+  if matches(ta[..mid], r) {
+    assert matches(ta, Plus(r));
+  } else {
+    var split :| 1 <= split <= |ta[..mid]| && matches(ta[..mid][..split], r) && matches(ta[..mid][split..], Plus(r));
+    assert ta[..mid][..split] == ta[..split];
+    assert ta[..mid][split..] == ta[split..mid];
+    assert ta[split..mid] == ta[split..][..mid-split];
+    assert matches(ta, Plus(r));
+  }
+  catenating_matches_single(ta, Plus(r));
+}
+
+
+lemma preserve_match_r_plusr(ta: seq<Bit>, r: Reg)
+requires matches(ta, Cat([r, Plus(r)]))
+ensures matches(ta, Plus(r))
+ensures matches(ta, Cat([Plus(r)]))
+{
+  var mid :| 0 <= mid <= |ta| && matches(ta[..mid], (r)) && matches(ta[mid..], Cat([Plus(r)]));
+  assert matches(ta[mid..], Cat([Plus(r)]));
+  catenating_matches_single_rev(ta[mid..], Plus(r));
+  catenating_matches_single(ta, Plus(r));
+}
+
+lemma preserve_match_r_plusr_as_seq(ta: seq<Bit>, rs: seq<Reg>)
+requires matches(ta, Cat(rs + [Plus(Cat(rs))]))
+ensures matches(ta, Cat([Plus(Cat(rs))]))
+{
+  cat_n_split(ta, rs + [Plus(Cat(rs))], |rs|);
+  var split :| 0 <= split <= |ta| && matches(ta[..split], Cat(rs)) && matches(ta[split..], Cat([Plus(Cat(rs))]));
+  assert matches(ta, Cat([Cat(rs), Plus(Cat(rs))]));
+  preserve_match_r_plusr(ta, Cat(rs));
+}
+
 // This function allows us to move beyond just listing neighborhoods as finite strings.
 // Specifically, we want to convert long finite regexes into short "classy" ones.
 method generalize_cover(r: Reg, params: GeneralizeParams) returns (covers: set<Reg>)
@@ -684,6 +792,31 @@ ensures forall tape: HalfTape :: half_tape_matches(tape, r) ==> exists cover :: 
   }
 
   if r.Cat? {
+    {
+      var i := 0;
+      while i < |r.items| {
+        if r.items[i].Plus?
+          && r.items[i].rep.Cat?
+          && i >= |r.items[i].rep.items|
+          && r.items[i - |r.items[i].rep.items| .. i] == r.items[i].rep.items
+        {
+          // We have Plus(Cat(cs)) preceded immediately by cs.
+          // Remove the cs, retain the plus.
+          var fixed := Cat(r.items[..i - |r.items[i].rep.items|] + [r.items[i]] + r.items[i+1..]);
+          forall tape | matches(tape, Cat(r.items[i-|r.items[i].rep.items|..i+1]))
+          ensures matches(tape, Cat([r.items[i]])) {
+            assert Cat(r.items[i-|r.items[i].rep.items|..i+1])
+              == Cat(r.items[i-|r.items[i].rep.items|..i] + [r.items[i]]);
+            preserve_match_r_plusr_as_seq(tape, r.items[i].rep.items);
+          }
+          cat_replace(r.items, i - |r.items[i].rep.items|, i+1, [r.items[i]]);
+          return { fixed };
+        }
+        i := i + 1;
+      }
+    }
+
+
     if |r.items| >= 1 && r.items[|r.items|-1] == Lit(B0) {
       var shorter := Cat(r.items[..|r.items|-1]);
       can_trim_0(r);
@@ -693,6 +826,50 @@ ensures forall tape: HalfTape :: half_tape_matches(tape, r) ==> exists cover :: 
       covers := generalize_cover(shorter, params);
       return covers;
     }
+
+    // If there is a Plus(r) next to an r, combine them together.
+
+    if |r.items| >= 1 && r.items[0].Alt? {
+      // Split into two cases.
+      var alt_first := cat(r.items[0].first, Cat(r.items[1..]));
+      var alt_second := cat(r.items[0].second, Cat(r.items[1..]));
+
+      forall tape {:trigger TriggerGeneralizeAlt(tape)} | half_tape_matches(tape, r)
+      ensures half_tape_matches(tape, Cat([r.items[0].first, Cat(r.items[1..])]))
+      || half_tape_matches(tape, Cat([r.items[0].second, Cat(r.items[1..])]))
+      {
+        var n :| drop_from_tape(tape, n) == HalfTape([]) && matches(take_from_tape(tape, n), r);
+        var t := take_from_tape(tape, n);
+        var t_split :| 0 <= t_split <= |t| && matches(t[..t_split], r.items[0]) && matches(t[t_split..], Cat(r.items[1..]));
+        if matches(t[..t_split], r.items[0].first) {
+          assert matches(t[t_split..], Cat(r.items[1..]));
+          catenating_matches_single(t[t_split..], Cat(r.items[1..]));
+          // Here is the problem!
+          assert half_tape_matches(tape, Cat([r.items[0].first, Cat(r.items[1..])]));
+        } else {
+          assert matches(t[..t_split], r.items[0].second);
+          catenating_matches_single(t[t_split..], Cat(r.items[1..]));
+          // Here is the problem!
+          assert half_tape_matches(tape, Cat([r.items[0].second, Cat(r.items[1..])]));
+        }
+      }
+
+      forall tape | half_tape_matches(tape, r)
+      ensures half_tape_matches(tape, alt_first) || half_tape_matches(tape, alt_second)
+      {
+        assert TriggerGeneralizeAlt(tape) == 0;
+        if half_tape_matches(tape, Cat([r.items[0].first, Cat(r.items[1..])])) {
+          cat_works(r.items[0].first, Cat(r.items[1..]));
+        } else {
+          assert half_tape_matches(tape, Cat([r.items[0].second, Cat(r.items[1..])]));
+          cat_works(r.items[0].second, Cat(r.items[1..]));
+        }
+      }
+      
+      covers := { alt_first, alt_second };      
+      return covers;
+    }
+
     // Most optimizations happen here.
     if params.max_length != 0 && |r.items| > params.max_length {
       // If the regex is too large, assume that far-away portions are unimportant, and
@@ -1233,7 +1410,11 @@ ensures result ==> program_loops_forever(program)
     gas := gas + 1;
 
     var current: RegexState :| current in todo_pile;
-    print current;
+    print "left: ";
+    print current.left;
+    print "\n";
+    print "right: ";
+    print current.right;
     print "\n";
     todo_pile := todo_pile - {current};
     done_pile := done_pile + {current};
@@ -1465,9 +1646,10 @@ method Main() {
   // var busy_beaver_candidate: Program := from_string("1RB1LC_1RC1RB_1RD0LE_1LA1LD_---0LA");
 
   // var program := from_string("1RB---_0RC0LE_1LD0LA_1LB1RB_1LC1RC"); // cycler
-  var program := from_string("1RB0LE_1LC1LA_1LD1LB_1RB---_0RE1RB"); // null-translated cycler
+  // var program := from_string("1RB0LE_1LC1LA_1LD1LB_1RB---_0RE1RB"); // null-translated cycler
+  var program := from_string("1RB---_0RC0LB_1RD0RE_1LE1RD_1LC1LB");
 
-  var result := regex_cycler_decider(program, 30, GeneralizeParams(
+  var result := regex_cycler_decider(program, 100, GeneralizeParams(
     max_length := 0
   ));
 
