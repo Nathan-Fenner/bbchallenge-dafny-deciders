@@ -372,13 +372,21 @@ ensures forall cover | cover in covers :: segment_radius(radius, cover)
         pattern := config.pattern[0 - radius := input.head]
       );
 
-      forall prev | single_steps_into(program, prev, config) && get_input(prev) == input
-      ensures config_matches_state(still_before, prev) || config_matches_state(on_edge, prev)
-      {
-        // ...
+      if 0 - radius in config.pattern && config.pattern[0 - radius] !=program[input].write {
+        forall prev | single_steps_into(program, prev, config) && get_input(prev) == input
+        ensures config_matches_state(still_before, prev)
+        {
+          // ...
+        }
+        return { still_before };
+      } else {
+        forall prev | single_steps_into(program, prev, config) && get_input(prev) == input
+        ensures config_matches_state(still_before, prev) || config_matches_state(on_edge, prev)
+        {
+          // ...
+        }
+        return { still_before, on_edge };
       }
-
-      return { still_before, on_edge };
     }
     case After(lim) => {
       var prev_index_pattern := After(lim - direction_int(program[input].move));
@@ -396,7 +404,7 @@ ensures forall cover | cover in covers :: segment_radius(radius, cover)
       }
 
       // There are two cases here:
-      var still_before := HaltingSegment(
+      var still_after := HaltingSegment(
         color := input.color,
         position := After(lim),
         pattern := config.pattern
@@ -408,11 +416,11 @@ ensures forall cover | cover in covers :: segment_radius(radius, cover)
       );
 
       forall prev | single_steps_into(program, prev, config) && get_input(prev) == input
-      ensures config_matches_state(still_before, prev) || config_matches_state(on_edge, prev)
+      ensures config_matches_state(still_after, prev) || config_matches_state(on_edge, prev)
       {
       }
 
-      return { still_before, on_edge };
+      return { still_after, on_edge };
     }
   }
 }
@@ -727,6 +735,9 @@ ensures loops_forever ==> !program_eventually_halts(program)
   var radius := 1;
   var remaining_gas := gas;
   while remaining_gas > 0 {
+    print "try with ";
+    print radius;
+    print "...\n";
     var does_loop, leftover_gas := decide_initial_segment_fixed_radius(radius, program, remaining_gas);
     assert leftover_gas < remaining_gas;
     remaining_gas := leftover_gas;
@@ -736,4 +747,43 @@ ensures loops_forever ==> !program_eventually_halts(program)
     radius := radius + 1;
   }
   return false;
+}
+
+method Main() {
+  var program := from_string("1RB1LB_1LC0RE_0LD0RA_1RA0LD_---0RC");
+
+  var prove_it_halts := decide_initial_segment(program, 200_000);
+  print "halts? ";
+  print prove_it_halts;
+  print "\n";
+
+
+  /*
+  // This is the current candidate for BB(5):
+  // 1RB1LC_1RC1RB_1RD0LE_1LA1LD_---0LA
+  // It runs for 47,176,870 steps and then halts.  
+  var busy_beaver_candidate := from_string("1RB1LC_1RC1RB_1RD0LE_1LA1LD_---0LA");
+  // var busy_beaver_candidate: Program := map[program];
+  print busy_beaver_candidate;
+  print "\n";
+
+  var step_count;
+  var result;
+  
+  step_count := 47_176_869;
+  print "Run for ";
+  print step_count;
+  print " steps...\n-> halt? ";
+  result := machine_step_iterative(busy_beaver_candidate, INITIAL_STATE, step_count);
+  print result.Halt?;
+  print "\n";
+
+  step_count := 47_176_870;
+  print "Run for ";
+  print step_count;
+  print " steps...\n-> halt? ";
+  result := machine_step_iterative(busy_beaver_candidate, INITIAL_STATE, step_count);
+  print result.Halt?;
+  print "\n";
+  */
 }
