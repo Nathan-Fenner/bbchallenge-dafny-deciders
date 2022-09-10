@@ -4,10 +4,14 @@
 // A bit is either 0 or 1.
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub enum Bit {
-    B0,
-    B1,
+    B0 = 0,
+    B1 = 1,
 }
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    io::{Read, Write},
+    os::windows::prelude::FileExt,
+};
 
 use Bit::*;
 
@@ -15,11 +19,11 @@ use Bit::*;
 // TM are instead called "Colors": CA, CB, CC, CD, CE, with the "C" standing for "Color".
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub enum Color {
-    CA,
-    CB,
-    CC,
-    CD,
-    CE,
+    CA = 1,
+    CB = 2,
+    CC = 3,
+    CD = 4,
+    CE = 5,
 }
 use Color::*;
 
@@ -51,7 +55,37 @@ pub struct Input {
     pub color: Color,
 }
 
-pub type Program = HashMap<Input, Action>;
+impl Input {
+    fn as_index(self) -> usize {
+        self.head as usize * 5 + (self.color as usize - 1)
+    }
+}
+
+// pub type Program = HashMap<Input, Action>;
+
+pub struct Program {
+    actions: [Option<Action>; 10],
+}
+
+impl Program {
+    fn contains_key(&self, input: &Input) -> bool {
+        self.actions[input.as_index()].is_some()
+    }
+    fn keys(&self) -> impl Iterator<Item = Input> + '_ {
+        [B0, B1].into_iter().flat_map(move |bit| {
+            [CA, CB, CC, CD, CE]
+                .into_iter()
+                .map(move |color| Input { head: bit, color })
+                .filter(|input| self.contains_key(input))
+        })
+    }
+}
+impl std::ops::Index<&Input> for Program {
+    type Output = Action;
+    fn index(&self, index: &Input) -> &Self::Output {
+        self.actions[index.as_index()].as_ref().unwrap()
+    }
+}
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -237,7 +271,14 @@ pub fn from_string(desc: &str) -> Program {
             },
         );
     }
-    program
+
+    let mut res = Program {
+        actions: [None; 10],
+    };
+    for (key, val) in program {
+        res.actions[key.as_index()] = Some(val);
+    }
+    res
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
@@ -246,6 +287,7 @@ enum Pos {
     Before { limit: i32 },
     After { limit: i32 },
 }
+use clap::Parser;
 use Pos::*;
 
 #[derive(Clone, Eq, PartialEq, Hash, Debug)]
@@ -406,8 +448,8 @@ fn cover_all_inputs(
 ) -> HashSet<HaltingSegment> {
     let mut covers = HashSet::new();
 
-    let todo = program.keys().copied(); // set input: Input | input in program;
-                                        // let mut done: HashSet<Input> = HashSet::new();
+    let todo = program.keys(); // set input: Input | input in program;
+                               // let mut done: HashSet<Input> = HashSet::new();
     for input in todo {
         // :| input in todo;
         let input_covers = cover_input(radius, program, config, input);
@@ -458,7 +500,7 @@ fn decide_initial_segment_fixed_radius(radius: i32, program: &Program, gas: i64)
         // Take arbitrary cover in todo_covers
         // var cover :| cover in todo_covers;
         let cover = todo_covers.pop().unwrap();
-        print_segment(radius, &cover);
+        // print_segment(radius, &cover);
 
         if can_match_initial(&cover) {
             return (false, remaining_gas);
@@ -489,7 +531,7 @@ pub fn decide_initial_segment(program: &Program, gas: i64) -> bool {
     let mut radius = 1;
     let mut remaining_gas = gas;
     while remaining_gas > 0 {
-        println!("radius {}", radius);
+        // println!("radius {}", radius);
         let (does_loop, leftover_gas) =
             decide_initial_segment_fixed_radius(radius, program, remaining_gas);
         remaining_gas = leftover_gas;
@@ -565,9 +607,106 @@ fn print_segment(radius: i32, segment: &HaltingSegment) {
     println!();
 }
 
+#[derive(clap::Parser, Debug)]
+#[clap(author, version, about, long_about = None)]
+struct Options {
+    #[clap(long = "seed-file")]
+    seed_file_path: String,
+
+    #[clap(long = "unresolved-list-file")]
+    unresolved_file_path: String,
+
+    #[clap(long = "output-file")]
+    output_file: String,
+
+    #[clap(long = "step-limit", default_value_t = 1000)]
+    step_limit: i64,
+}
+
 fn main() {
-    let program = from_string("1RB1LB_1LC0RE_0LD0RA_1RA0LD_---0RC");
-    println!("{:?}", program);
-    let prove_it_halts = decide_initial_segment_fixed_radius(2, &program, 500_000);
-    println!("halts? {:?}", prove_it_halts);
+    let options = Options::parse();
+
+    let seed_file = std::fs::File::open(&options.seed_file_path)
+        .expect("The --seed-file must be an accessible file.");
+
+    let mut unresolved_file = std::fs::File::open(&options.unresolved_file_path)
+        .expect("The --unresolved-list-file must be an accessible file.");
+
+    let total_unresolved_count = unresolved_file.metadata().unwrap().len() / 4;
+    println!("Unresolved machines: {}", total_unresolved_count);
+
+    if options.step_limit <= 0 {
+        panic!("The step_limit must be positive.");
+    }
+
+    let mut count_proc = 0;
+    let mut total_looping = 0;
+
+    let limit = options.step_limit;
+
+    let mut output = std::fs::File::create(&options.output_file).expect("new file");
+    loop {
+        let mut index: [u8; 4] = [0; 4];
+        let count = unresolved_file.read(&mut index).expect("works");
+        if count == 0 {
+            break;
+        }
+        // Get the index.
+        let raw_index = u32::from_be_bytes(index);
+        let mut buf: [u8; 30] = [0; 30];
+        // Scan to the place in the big file.
+        let count_read = seed_file
+            .seek_read(&mut buf, (raw_index as u64 + 1) * 30)
+            .expect("works");
+        assert!(count_read == 30);
+        let program = byte_buffer_to_readable_program(&buf);
+
+        let loopy = decide_initial_segment(&from_string(&program), limit);
+        if loopy {
+            let count = output.write(&index).expect("works");
+            assert!(count == 4);
+            total_looping += 1;
+        }
+
+        count_proc += 1;
+        if count_proc % 1000 == 0 {
+            println!(
+                "{:8}/{:8} :: so far proved {:8}",
+                count_proc, total_unresolved_count, total_looping
+            );
+        }
+    }
+
+    fn byte_buffer_to_readable_program(buffer: &[u8]) -> String {
+        let mut output = String::new();
+        for bi in (0..30).step_by(3) {
+            if bi > 0 && bi % 6 == 0 {
+                output += "_";
+            }
+            if buffer[bi + 2] == 0 {
+                output += "---";
+                continue;
+            }
+            if buffer[bi] == 0 {
+                output += "0";
+            } else if buffer[bi] == 1 {
+                output += "1";
+            } else {
+                panic!();
+            }
+            if buffer[bi + 1] == 0 {
+                output += "R";
+            } else if buffer[bi + 1] == 1 {
+                output += "L";
+            } else {
+                panic!();
+            }
+            if buffer[bi + 2] >= 1 && buffer[bi + 2] <= 5 {
+                output += &format!("{}", (buffer[bi + 2] - 1 + b'A') as char);
+            } else {
+                panic!();
+            }
+        }
+        output
+    }
 }
